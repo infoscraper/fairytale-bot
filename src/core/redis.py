@@ -27,5 +27,10 @@ async def close_redis():
     global _redis_client
     
     if _redis_client:
-        await _redis_client.close()
+        try:
+            # Try new API first
+            await _redis_client.aclose()
+        except AttributeError:
+            # Fallback to old API
+            await _redis_client.close()
         _redis_client = None
