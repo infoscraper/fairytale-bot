@@ -38,7 +38,7 @@ async def init_database():
             import alembic.config
             
             # Run Alembic migrations
-            alembic_cfg = alembic.config.Config("alembic.ini")
+            alembic_cfg = alembic.config.Config("/app/alembic.ini")
             alembic_cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
             
             logger.info("📦 Running database migrations...")

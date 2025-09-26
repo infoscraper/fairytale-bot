@@ -5,7 +5,11 @@ nixPkgs = ["ffmpeg"]
 cmds = ["pip install -r requirements.txt"]
 
 [phases.build]
-cmds = ["echo 'Build completed'"]
+cmds = [
+    "cp -r alembic /app/",
+    "cp alembic.ini /app/",
+    "echo 'Build completed'"
+]
 
 [start]
 cmd = "python -m src.main"
