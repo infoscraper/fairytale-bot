@@ -9,7 +9,7 @@ pydantic>=2.9.0
 pydantic-settings>=2.5.0
 
 # Redis & Caching
-redis[hiredis]==5.0.1
+redis[hiredis]==4.6.0
 aioredis==2.0.1
 
 # Background Tasks
