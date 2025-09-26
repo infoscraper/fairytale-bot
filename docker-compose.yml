@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: fairytale_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fairytale_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fairytale_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-fairytale_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fairytale_user} -d ${POSTGRES_DB:-fairytale_db}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: fairytale_redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: fairytale_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@fairytale.local
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    profiles:
+      - tools
+
+  app:
+    build: .
+    container_name: fairytale_app
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-fairytale_user}:${POSTGRES_PASSWORD:-fairytale_pass}@postgres:5432/${POSTGRES_DB:-fairytale_db}
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-True}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+    profiles:
+      - app
+
+  celery_worker:
+    build: .
+    container_name: fairytale_celery
+    command: celery -A src.core.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-fairytale_user}:${POSTGRES_PASSWORD:-fairytale_pass}@postgres:5432/${POSTGRES_DB:-fairytale_db}
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-True}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    profiles:
+      - celery
+
+  flower:
+    build: .
+    container_name: fairytale_flower
+    command: celery -A src.core.celery_app flower
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:
+  redis_data:
