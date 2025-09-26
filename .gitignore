@@ -83,3 +83,10 @@ htmlcov/
 # Alembic
 alembic/versions/*.py
 !alembic/versions/__init__.py
+
+# Railway
+.railway/
+railway.log
+
+# Local development
+docker-compose.override.yml
