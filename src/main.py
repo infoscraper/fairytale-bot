@@ -4,6 +4,8 @@ Fairytale Bot - Entry point
 """
 import asyncio
 import logging
+import os
+import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -22,8 +24,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def init_database():
+    """Initialize database with migrations"""
+    logger.info("🔄 Initializing database...")
+    
+    try:
+        # Check if we're in Railway environment
+        if os.getenv("RAILWAY_ENVIRONMENT"):
+            logger.info("🚂 Running in Railway environment, applying migrations...")
+            
+            # Import Alembic components
+            import alembic.command
+            import alembic.config
+            
+            # Run Alembic migrations
+            alembic_cfg = alembic.config.Config("alembic.ini")
+            alembic_cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+            
+            logger.info("📦 Running database migrations...")
+            alembic.command.upgrade(alembic_cfg, "head")
+            logger.info("✅ Database migrations completed successfully!")
+        else:
+            logger.info("🏠 Running locally, skipping automatic migrations")
+            
+    except Exception as e:
+        logger.error(f"❌ Error initializing database: {e}")
+        # Don't exit in production, just log the error
+        if not os.getenv("RAILWAY_ENVIRONMENT"):
+            raise
+
+
 async def main():
     """Main function to start the bot"""
+    
+    # Initialize database first (only in Railway)
+    await init_database()
     
     # Initialize bot with default properties
     bot = Bot(

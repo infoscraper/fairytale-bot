@@ -8,4 +8,4 @@ cmds = ["pip install -r requirements.txt"]
 cmds = ["echo 'Build completed'"]
 
 [start]
-cmd = "chmod +x start.sh && ./start.sh"
+cmd = "python -m src.main"
