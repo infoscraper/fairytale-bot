@@ -27,5 +27,9 @@ async def close_redis():
     global _redis_client
     
     if _redis_client:
-        await _redis_client.close()
+        # Handle both Redis 4.x and 5.x versions
+        if hasattr(_redis_client, 'aclose'):
+            await _redis_client.aclose()
+        else:
+            await _redis_client.close()
         _redis_client = None

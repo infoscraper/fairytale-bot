@@ -31,19 +31,17 @@ async def init_database():
     try:
         # Check if we're in Railway environment
         if os.getenv("RAILWAY_ENVIRONMENT"):
-            logger.info("🚂 Running in Railway environment, applying migrations...")
+            logger.info("🚂 Running in Railway environment, creating tables...")
             
-            # Import Alembic components
-            import alembic.command
-            import alembic.config
+            # Import database components
+            from .core.database import engine
+            from .models import Base
             
-            # Run Alembic migrations
-            alembic_cfg = alembic.config.Config("/app/alembic.ini")
-            alembic_cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+            # Create all tables
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
             
-            logger.info("📦 Running database migrations...")
-            alembic.command.upgrade(alembic_cfg, "head")
-            logger.info("✅ Database migrations completed successfully!")
+            logger.info("✅ Database tables created successfully!")
         else:
             logger.info("🏠 Running locally, skipping automatic migrations")
             

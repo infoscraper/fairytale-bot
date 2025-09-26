@@ -6,8 +6,7 @@ cmds = ["pip install -r requirements.txt"]
 
 [phases.build]
 cmds = [
-    "cp -r alembic /app/",
-    "cp alembic.ini /app/",
+    "ls -la",
     "echo 'Build completed'"
 ]
 
