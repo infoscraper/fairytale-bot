@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
 
 from .core.config import settings
-from .core.redis import get_redis
+from .core.redis import get_redis, close_redis
 from .bot.handlers import setup_routers
 from .bot.middlewares import setup_middlewares
 
@@ -21,6 +21,12 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# Silence noisy third-party loggers in production
+logging.getLogger("aiogram.dispatcher").setLevel(logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("elevenlabs").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,6 +86,12 @@ async def main():
         logger.info(f"🤖 Bot token: {settings.TELEGRAM_BOT_TOKEN[:10]}...")
         logger.info(f"🌍 Environment: {settings.ENVIRONMENT}")
         
+        # Gate polling by environment and role to avoid conflicts
+        should_poll = settings.BOT_ROLE == "poller" and settings.ENVIRONMENT in {"production", "staging", "development"}
+        if not should_poll:
+            logger.warning(f"🤚 Polling disabled. ENVIRONMENT={settings.ENVIRONMENT}, BOT_ROLE={settings.BOT_ROLE}")
+            return
+
         # Start polling
         await dp.start_polling(bot)
         
@@ -88,6 +100,7 @@ async def main():
         raise
     finally:
         await bot.session.close()
+        await close_redis()
         logger.info("🛑 Bot stopped")
 
 

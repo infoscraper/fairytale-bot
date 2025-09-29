@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Environment
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
+    BOT_ROLE: str = "poller"  # poller | disabled
     
     class Config:
         env_file = ".env"

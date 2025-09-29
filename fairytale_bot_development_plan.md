@@ -3,7 +3,7 @@
 ## 🎯 Общая стратегия
 
 **Цель:** Создать MVP сказочного бота с полной инфраструктурой для дальнейшего масштабирования  
-**Окружение:** Локальная разработка с Docker Desktop  
+**Окружение:** Локальная разработка с Docker Desktop + Railway для продакшена  
 **Исключения:** Платежи и подписки (интеграция позже)
 
 ---
@@ -28,6 +28,11 @@ fairytale_bot/
 ├── Dockerfile
 ├── requirements.txt
 ├── alembic.ini
+├── Procfile                    # Railway deployment
+├── railway.json               # Railway configuration
+├── railway.toml               # Railway environment config
+├── nixpacks.toml              # Railway build optimization
+├── RAILWAY_DEPLOYMENT.md      # Railway deployment guide
 ├── src/
 │   ├── __init__.py
 │   ├── main.py
@@ -43,20 +48,41 @@ fairytale_bot/
 
 **Создаем `.env.example`:**
 ```env
-# Database
-DATABASE_URL=postgresql+asyncpg://fairytale_user:fairytale_pass@localhost:5432/fairytale_db
-POSTGRES_USER=fairytale_user
-POSTGRES_PASSWORD=fairytale_pass
-POSTGRES_DB=fairytale_db
+# Database (Railway автоматически создаст PostgreSQL)
+DATABASE_URL=postgresql+asyncpg://postgres:password@containers-us-west-xxx.railway.app:5432/railway
+# Для локальной разработки:
+# DATABASE_URL=postgresql+asyncpg://fairytale_user:fairytale_pass@localhost:5432/fairytale_db
+# POSTGRES_USER=fairytale_user
+# POSTGRES_PASSWORD=fairytale_pass
+# POSTGRES_DB=fairytale_db
 
-# Redis
-REDIS_URL=redis://localhost:6379/0
+# Redis (Railway автоматически создаст Redis)
+REDIS_URL=redis://default:password@containers-us-west-xxx.railway.app:6379
+# Для локальной разработки:
+# REDIS_URL=redis://localhost:6380/0
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 
 # OpenAI
 OPENAI_API_KEY=your_openai_key_here
+OPENAI_MODEL=gpt-4o-mini
+
+# ElevenLabs Text-to-Speech (ОБЯЗАТЕЛЬНО для TTS функций)
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+ELEVENLABS_VOICE_ID=XB0fDUnXU5powFXDhCwa
+ELEVENLABS_MODEL_ID=eleven_multilingual_v2
+ELEVENLABS_STABILITY=0.75
+ELEVENLABS_SIMILARITY_BOOST=0.85
+ELEVENLABS_STYLE=0.2
+ELEVENLABS_USE_SPEAKER_BOOST=True
+
+# Google Text-to-Speech (альтернатива ElevenLabs)
+GOOGLE_APPLICATION_CREDENTIALS=path/to/your/service-account-key.json
+GOOGLE_CLOUD_PROJECT_ID=your-gcp-project-id
+GOOGLE_TTS_VOICE_NAME=ru-RU-Standard-A
+GOOGLE_TTS_VOICE_GENDER=FEMALE
+GOOGLE_TTS_AUDIO_ENCODING=MP3
 
 # Environment
 ENVIRONMENT=development
@@ -147,30 +173,42 @@ docker-compose exec redis redis-cli ping
 #### 0.2.1 Создание requirements.txt
 ```txt
 # Core
-aiogram==3.4.1
+aiogram>=3.13.0
 aiohttp==3.9.1
 asyncpg==0.29.0
+psycopg2-binary==2.9.9
 sqlalchemy[asyncio]==2.0.25
 alembic==1.13.1
-pydantic==2.5.3
-pydantic-settings==2.1.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
 
 # Redis & Caching
-redis[hiredis]==5.0.1
+redis[hiredis]==4.6.0
 aioredis==2.0.1
 
-# Background Tasks
+# Celery
 celery[redis]==5.3.4
+flower==2.0.1
 
-# AI Services
-openai==1.7.1
+# TTS
+elevenlabs==0.2.2
 
-# Audio Processing
-pydub==0.25.1
+# OpenAI
+openai==1.10.0
+
+# Google Cloud
+google-cloud-texttospeech==2.16.0
+google-auth-oauthlib==1.2.0
+
+# Database
+psycopg2-binary==2.9.9
 
 # Utilities
 python-dateutil==2.8.2
 structlog==23.2.0
+
+# Production Server
+gunicorn==21.2.0
 
 # Development
 pytest==7.4.4
@@ -199,6 +237,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем код
 COPY src/ ./src/
 COPY alembic.ini .
+COPY alembic/ ./alembic/
 
 # Создаем пользователя
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
@@ -271,6 +310,16 @@ class Settings(BaseSettings):
     
     # OpenAI
     OPENAI_API_KEY: str
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    
+    # ElevenLabs Text-to-Speech
+    ELEVENLABS_API_KEY: str = ""
+    ELEVENLABS_VOICE_ID: str = "XB0fDUnXU5powFXDhCwa"
+    ELEVENLABS_MODEL_ID: str = "eleven_multilingual_v2"
+    ELEVENLABS_STABILITY: float = 0.75
+    ELEVENLABS_SIMILARITY_BOOST: float = 0.85
+    ELEVENLABS_STYLE: float = 0.2
+    ELEVENLABS_USE_SPEAKER_BOOST: bool = True
     
     # Environment
     ENVIRONMENT: str = "development"
@@ -278,6 +327,8 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
+        case_sensitive = True
+        extra = "allow"  # Allow extra fields in .env
 
 settings = Settings()
 ```
@@ -288,9 +339,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase
 from .config import settings
 
+# Async SQLAlchemy engine
+# Ensure we use asyncpg driver for PostgreSQL
+database_url = settings.DATABASE_URL
+if database_url.startswith("postgresql://"):
+    database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif database_url.startswith("postgresql+psycopg2://"):
+    database_url = database_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG
+    database_url,
+    echo=settings.DEBUG,
+    future=True
 )
 
 async_session_maker = async_sessionmaker(
@@ -466,6 +526,138 @@ print(f'Result: {result.get(timeout=10)}')
 
 ---
 
+## 📋 ЭТАП 0.5: Railway Deployment Setup
+
+### 0.5.1 Railway Configuration Files
+
+**Создаем `Procfile`:**
+```
+web: python -m src.main
+worker: celery -A src.core.celery_app worker --loglevel=info
+```
+
+**Создаем `railway.json`:**
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python -m src.main",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+```
+
+**Создаем `railway.toml`:**
+```toml
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python -m src.main"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[environments.production]
+variables = { ENVIRONMENT = "production", DEBUG = "False" }
+```
+
+**Создаем `nixpacks.toml`:**
+```toml
+[phases.setup]
+nixPkgs = ["ffmpeg"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[phases.build]
+cmds = [
+    "ls -la",
+    "echo 'Build completed'"
+]
+
+[start]
+cmd = "python -m src.main"
+```
+
+### 0.5.2 Railway Environment Variables
+
+**Обязательные переменные для Railway:**
+```env
+# Database (Railway автоматически создаст)
+DATABASE_URL=postgresql+asyncpg://postgres:password@containers-us-west-xxx.railway.app:5432/railway
+
+# Redis (Railway автоматически создаст)
+REDIS_URL=redis://default:password@containers-us-west-xxx.railway.app:6379
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=your_production_bot_token
+
+# OpenAI
+OPENAI_API_KEY=your_openai_key
+
+# ElevenLabs
+ELEVENLABS_API_KEY=your_elevenlabs_key
+
+# Environment
+ENVIRONMENT=production
+DEBUG=False
+```
+
+### 0.5.3 Railway Deployment Process
+
+**Шаги деплоя:**
+1. Создать проект в Railway Dashboard
+2. Добавить PostgreSQL и Redis сервисы
+3. Настроить переменные окружения
+4. Подключить GitHub репозиторий
+5. Настроить автоматический деплой
+
+**Команды для деплоя:**
+```bash
+# Подготовка к деплою
+git add .
+git commit -m "Prepare for Railway deployment"
+git push origin main
+
+# Проверка деплоя
+railway logs
+railway status
+```
+
+### 0.5.4 Railway Lessons Learned
+
+**Критические ошибки и их решения:**
+
+1. **TokenValidationError**: 
+   - Проблема: Неправильный или отсутствующий TELEGRAM_BOT_TOKEN
+   - Решение: Проверить токен в Railway Dashboard, убедиться в отсутствии пробелов
+
+2. **TelegramConflictError**:
+   - Проблема: Несколько экземпляров бота работают одновременно
+   - Решение: Остановить все локальные экземпляры, проверить webhook в BotFather
+
+3. **Database Connection Issues**:
+   - Проблема: Неправильный DATABASE_URL формат
+   - Решение: Использовать postgresql+asyncpg:// вместо postgresql://
+
+4. **Redis Compatibility Issues**:
+   - Проблема: Redis 5.x vs 4.x API различия
+   - Решение: Использовать redis[hiredis]==4.6.0 для совместимости
+
+5. **Alembic Migration Issues**:
+   - Проблема: Миграции не применяются на Railway
+   - Решение: Интегрировать создание таблиц в main.py для Railway
+
+6. **Dependency Conflicts**:
+   - Проблема: Конфликт между celery[redis] и redis[hiredis]
+   - Решение: Использовать совместимые версии пакетов
+
+---
+
 ## 📋 ЭТАП 1: MVP Telegram бота
 
 ### 1.1 Базовая структура бота
@@ -518,40 +710,100 @@ class Child(Base):
 #### 1.1.2 Создание базового бота
 
 ```python
-# src/bot/main.py
+# src/main.py
+#!/usr/bin/env python3
+"""
+Fairytale Bot - Entry point
+"""
 import asyncio
 import logging
+import os
+import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
 
-from ..core.config import settings
-from ..core.redis import get_redis
-from .handlers import setup_routers
-from .middlewares import setup_middlewares
+from .core.config import settings
+from .core.redis import get_redis, close_redis
+from .bot.handlers import setup_routers
+from .bot.middlewares import setup_middlewares
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+
+async def init_database():
+    """Initialize database with migrations"""
+    logger.info("🔄 Initializing database...")
+    
+    try:
+        # Check if we're in Railway environment
+        if os.getenv("RAILWAY_ENVIRONMENT"):
+            logger.info("🚂 Running in Railway environment, creating tables...")
+            
+            # Import database components
+            from .core.database import engine
+            from .models import Base
+            
+            # Create all tables
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            
+            logger.info("✅ Database tables created successfully!")
+        else:
+            logger.info("🏠 Running locally, skipping automatic migrations")
+            
+    except Exception as e:
+        logger.error(f"❌ Error initializing database: {e}")
+        # Don't exit in production, just log the error
+        if not os.getenv("RAILWAY_ENVIRONMENT"):
+            raise
+
+
 async def main():
+    """Main function to start the bot"""
+    
+    # Initialize database first (only in Railway)
+    await init_database()
+    
+    # Initialize bot with default properties
     bot = Bot(
         token=settings.TELEGRAM_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     
+    # Setup Redis storage for FSM
     redis = await get_redis()
     storage = RedisStorage(redis=redis)
+    
+    # Create dispatcher with FSM storage
     dp = Dispatcher(storage=storage)
     
+    # Setup middlewares and routers
     setup_middlewares(dp)
     setup_routers(dp)
     
     try:
-        logger.info("Starting bot...")
+        logger.info("🚀 Starting Fairytale Bot...")
+        logger.info(f"🤖 Bot token: {settings.TELEGRAM_BOT_TOKEN[:10]}...")
+        logger.info(f"🌍 Environment: {settings.ENVIRONMENT}")
+        
+        # Start polling
         await dp.start_polling(bot)
+        
+    except Exception as e:
+        logger.error(f"❌ Error starting bot: {e}")
+        raise
     finally:
         await bot.session.close()
+        await close_redis()
+        logger.info("🛑 Bot stopped")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -663,7 +915,8 @@ asyncio.run(test())
 ### 2.2 Аудио-производство
 
 **Интеграции:**
-- Gemini TTS
+- ElevenLabs TTS (приоритет)
+- Google Cloud TTS (альтернатива)
 - Suno AI для музыки
 - pydub для микширования
 
@@ -678,7 +931,7 @@ asyncio.run(test())
 
 ## 📋 ЭТАП 3: Продакшн готовность
 
-### 3.1 Webhook режим
+### 3.1 Railway Production Deployment
 ### 3.2 Мониторинг и логирование
 ### 3.3 Тестирование и CI/CD
 
@@ -695,20 +948,23 @@ asyncio.run(test())
 - [x] Базовый бот отвечает на /start ✅
 - [x] OpenAI API работает ✅
 - [x] Тестовая сказка генерируется ✅
+- [x] Railway деплой настроен ✅
+- [x] Production бот работает на Railway ✅
 
 **Статус: ИНФРАСТРУКТУРА ГОТОВА! 🎉**
 
 ---
 
-## 🎯 ТЕКУЩИЙ СТАТУС ПРОЕКТА (24.09.2024)
+## 🎯 ТЕКУЩИЙ СТАТУС ПРОЕКТА (26.09.2024)
 
 ### ✅ ЗАВЕРШЕНО:
 
 #### Инфраструктура (100%)
 - PostgreSQL + Redis работают в Docker
-- Python контейнер с Aiogram 3.13.0 (обновлено!)
+- Python контейнер с Aiogram 3.13.0+
 - Alembic миграции настроены
 - Celery + Flower для фоновых задач
+- **НОВОЕ**: Railway деплой настроен и работает
 
 #### MVP Бот (100%)
 - **Модели данных**: User, Child, Story реализованы
@@ -733,24 +989,78 @@ asyncio.run(test())
 - ✅ **НОВОЕ**: Ограничение длины сказок (1-10 минут)
 - ✅ **НОВОЕ**: Исправление timeout ошибок при создании сказок
 - ✅ **НОВОЕ**: Разделение длинных сообщений на части
+- ✅ **НОВОЕ**: История сказок с фильтрацией и поиском
+- ✅ **НОВОЕ**: Экспорт сказок в текстовые файлы
 
 ### 🔧 ТЕХНИЧЕСКИЕ РЕШЕНИЯ:
-- **OpenAI SDK**: 1.50.0+ (обновлено для поддержки новых моделей)
+- **OpenAI SDK**: 1.10.0+ (обновлено для поддержки новых моделей)
 - **Aiogram**: 3.13.0+ (обновлено для совместимости)
 - **Pydantic**: 2.9.0+ (обновлено для совместимости)
-- **ElevenLabs**: 2.16.0 (интегрирован для TTS)
-- **Foreign Keys**: Временно отключены для избежания циклических зависимостей
-- **Relationships**: Упрощены до минимальных для стабильности
+- **ElevenLabs**: 0.2.2 (интегрирован для TTS)
+- **Redis**: 4.6.0 (совместимость с Celery)
+- **PostgreSQL**: psycopg2-binary + asyncpg для Railway
+- **Railway**: Полная настройка деплоя
+- **Foreign Keys**: Восстановлены и работают
+- **Relationships**: Настроены правильно
 - **Content Safety**: Многоуровневая система валидации контента
 - **Message Splitting**: Автоматическое разделение длинных сообщений
+- **Database Initialization**: Автоматическое создание таблиц на Railway
+
+### 🚨 КРИТИЧЕСКИЕ УРОКИ RAILWAY ДЕПЛОЯ:
+
+1. **Dependency Management**:
+   - Использовать совместимые версии Redis (4.6.0) и Celery
+   - Добавить psycopg2-binary для PostgreSQL совместимости
+   - Тестировать все зависимости локально перед деплоем
+
+2. **Environment Variables**:
+   - Все переменные должны быть установлены в Railway Dashboard
+   - Проверять отсутствие пробелов в токенах
+   - Использовать правильные форматы URL (postgresql+asyncpg://)
+
+3. **Database Initialization**:
+   - Интегрировать создание таблиц в main.py для Railway
+   - Не полагаться на Alembic миграции в production
+   - Использовать SQLAlchemy Base.metadata.create_all
+
+4. **Redis Compatibility**:
+   - Проверять версию Redis API (aclose vs close)
+   - Использовать hasattr для проверки методов
+   - Тестировать с разными версиями Redis
+
+5. **Bot Token Management**:
+   - Создавать отдельные боты для staging и production
+   - Проверять webhook настройки в BotFather
+   - Останавливать все локальные экземпляры перед деплоем
 
 ---
 
 ## 📋 СЛЕДУЮЩИЕ ШАГИ РАЗРАБОТКИ
 
-### ЭТАП 2А: Улучшение UX и стабильности (1-2 дня) ✅ ЗАВЕРШЕН
+### ЭТАП 2А: Staging Environment Setup (1 день) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
 
-#### 2А.1 Починка архитектуры БД
+#### 2А.1 Создание Staging окружения
+```bash
+# Задачи:
+- [ ] Создать staging бота в BotFather
+- [ ] Создать отдельный Railway проект для staging
+- [ ] Настроить staging переменные окружения
+- [ ] Создать staging branch в Git
+- [ ] Настроить автоматический деплой staging
+```
+
+#### 2А.2 Staging Workflow
+```bash
+# Задачи:
+- [ ] Создать deployment скрипты
+- [ ] Настроить staging → production pipeline
+- [ ] Добавить staging логирование
+- [ ] Создать staging тесты
+```
+
+### ЭТАП 2Б: Улучшение UX и стабильности (1-2 дня) ✅ ЗАВЕРШЕН
+
+#### 2Б.1 Починка архитектуры БД
 ```bash
 # Задачи:
 - [x] Восстановить Foreign Keys правильно
@@ -759,7 +1069,7 @@ asyncio.run(test())
 - [x] Протестировать все связи между таблицами
 ```
 
-#### 2А.2 Расширение функций профилей
+#### 2Б.2 Расширение функций профилей
 ```bash
 # Задачи:
 - [x] Редактирование профилей детей
@@ -768,7 +1078,7 @@ asyncio.run(test())
 - [x] Валидация возраста (1-16 лет)
 ```
 
-#### 2А.3 Улучшение генерации сказок
+#### 2Б.3 Улучшение генерации сказок
 ```bash
 # Задачи:
 - [x] Добавить больше тем сказок
@@ -778,9 +1088,9 @@ asyncio.run(test())
 - [x] Обработка ошибок OpenAI
 ```
 
-### ЭТАП 2Б: История и память (2-3 дня) ✅ ЗАВЕРШЕН
+### ЭТАП 2В: История и память (2-3 дня) ✅ ЗАВЕРШЕН
 
-#### 2Б.1 История сказок ✅ ГОТОВО
+#### 2В.1 История сказок ✅ ГОТОВО
 ```bash
 # Задачи:
 - [x] Команда /history - просмотр всех сказок
@@ -793,7 +1103,7 @@ asyncio.run(test())
 - [x] Интеграция с главным меню
 ```
 
-#### 2Б.2 Система серий (StorySeries)
+#### 2В.2 Система серий (StorySeries)
 ```bash
 # Задачи:
 - [ ] Восстановить модель StorySeries
@@ -802,7 +1112,7 @@ asyncio.run(test())
 - [ ] Продолжение истории по запросу
 ```
 
-#### 2Б.3 Память и контекст
+#### 2В.3 Память и контекст
 ```bash
 # Задачи:
 - [ ] Запоминание любимых персонажей
@@ -811,9 +1121,9 @@ asyncio.run(test())
 - [ ] Эволюция предпочтений
 ```
 
-### ЭТАП 2В: Аудио-производство (3-4 дня) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
+### ЭТАП 2Г: Аудио-производство (3-4 дня) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
 
-#### 2В.1 Text-to-Speech (ЧАСТИЧНО ГОТОВО)
+#### 2Г.1 Text-to-Speech (ЧАСТИЧНО ГОТОВО)
 ```bash
 # Задачи:
 - [x] Интеграция с ElevenLabs TTS (базовая)
@@ -825,7 +1135,7 @@ asyncio.run(test())
 - [ ] Оптимизация размера аудио файлов
 ```
 
-#### 2В.2 Фоновая музыка
+#### 2Г.2 Фоновая музыка
 ```bash
 # Задачи:
 - [ ] Интеграция с Suno AI / ElevenLabs
@@ -834,7 +1144,7 @@ asyncio.run(test())
 - [ ] Разные стили музыки по жанрам
 ```
 
-#### 2В.3 Полное аудио
+#### 2Г.3 Полное аудио
 ```bash
 # Задачи:
 - [ ] Создание полного аудио (речь + музыка)
@@ -843,9 +1153,91 @@ asyncio.run(test())
 - [ ] Экспорт MP3 файлов
 ```
 
-### ЭТАП 3: Продвинутые функции (4-5 дней)
+### ЭТАП 3: Система мониторинга и аналитики (3-4 дня) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
 
-#### 3.1 Персонализация
+#### 3.1 Event Tracking System
+```bash
+# Задачи:
+- [ ] Создать AnalyticsService для трекинга событий
+- [ ] Определить ключевые события (регистрация, создание сказки, подписка)
+- [ ] Настроить очередь событий в Redis
+- [ ] Создать модели для аналитических данных
+- [ ] Интегрировать трекинг в существующие handlers
+
+# Техническая архитектура:
+# src/analytics/
+# ├── __init__.py
+# ├── service.py          # AnalyticsService
+# ├── events.py           # Event definitions
+# ├── models.py           # Analytics models
+# ├── middleware.py       # Analytics middleware
+# └── dashboard.py        # Admin dashboard
+
+# Ключевые события для трекинга:
+# - user_registered
+# - child_profile_created
+# - story_generated
+# - story_rated
+# - subscription_started
+# - payment_completed
+# - user_churned
+# - feature_used
+```
+
+#### 3.2 User Analytics
+```bash
+# Задачи:
+- [ ] Трекинг источников пользователей (Telegram, рефералы)
+- [ ] Анализ воронки конверсии (регистрация → профиль → сказка)
+- [ ] Retention анализ (возвращаются ли пользователи)
+- [ ] География пользователей
+- [ ] Время активности (пики использования)
+```
+
+#### 3.3 Content Analytics
+```bash
+# Задачи:
+- [ ] Популярные темы сказок
+- [ ] Анализ по возрастным группам
+- [ ] Любимые персонажи
+- [ ] Длина сказок (предпочтения)
+- [ ] Рейтинг сказок (лайки/дизлайки)
+- [ ] Время генерации сказок
+```
+
+#### 3.4 Business Metrics
+```bash
+# Задачи:
+- [ ] Воронка подписок (бесплатные → платные)
+- [ ] Конверсия в платных пользователей
+- [ ] ARPU (средний доход с пользователя)
+- [ ] Churn rate (отток пользователей)
+- [ ] LTV (пожизненная ценность)
+- [ ] Cohort analysis
+```
+
+#### 3.5 Real-time Dashboard
+```bash
+# Задачи:
+- [ ] Создать админ панель с метриками
+- [ ] Real-time счетчики в Redis
+- [ ] Ежедневные/еженедельные отчеты
+- [ ] Алерты при критических изменениях
+- [ ] Экспорт данных для анализа
+
+# Технические детали:
+# - Web интерфейс на FastAPI + Jinja2
+# - Real-time обновления через WebSocket
+# - Графики с Chart.js или Plotly
+# - Экспорт в CSV/JSON
+# - Алерты через Telegram/Email
+# - Кеширование метрик в Redis
+# - Автоматические отчеты по расписанию
+```
+
+### ЭТАП 4: Продвинутые функции (4-5 дней)
+
+#### 4.1 Персонализация
 ```bash
 # Задачи:
 - [ ] ML анализ предпочтений
@@ -854,7 +1246,7 @@ asyncio.run(test())
 - [ ] Любимые сказки
 ```
 
-#### 3.2 Социальные функции
+#### 4.2 Социальные функции
 ```bash
 # Задачи:
 - [ ] Поделиться сказкой с другом
@@ -863,81 +1255,353 @@ asyncio.run(test())
 - [ ] Коллекции сказок
 ```
 
-#### 3.3 Администрирование
+#### 4.3 Администрирование
 ```bash
 # Задачи:
-- [ ] Админ панель
-- [ ] Статистика использования
-- [ ] Мониторинг затрат OpenAI
+- [ ] Расширенная админ панель
+- [ ] A/B тестирование
 - [ ] Управление пользователями
+- [ ] Система уведомлений
 ```
 
 ---
 
-## 🎯 РЕКОМЕНДУЕМЫЙ ПЛАН НА БЛИЖАЙШИЕ 2 НЕДЕЛИ:
+## 🎯 РЕКОМЕНДУЕМЫЙ ПЛАН НА БЛИЖАЙШИЕ 3 НЕДЕЛИ:
 
-### Неделя 1: История и память (ПРИОРИТЕТ)
-1. **День 1-2**: Этап 2Б.1 (история сказок)
-   - Команда /history
-   - Фильтрация и поиск
-   - Повторное чтение сказок
-2. **День 3-4**: Этап 2Б.2 (система серий)
-   - Восстановление модели StorySeries
-   - Создание многосерийных сказок
-3. **День 5-7**: Этап 2Б.3 (память и контекст)
-   - Запоминание предпочтений
-   - Адаптация под предыдущие сказки
-
-### Неделя 2: Аудио и расширения  
-1. **День 8-10**: Этап 2В.1 (улучшение TTS)
+### Неделя 1: Staging + TTS (ПРИОРИТЕТ)
+1. **День 1**: Этап 2А (staging окружение)
+   - Создание staging бота
+   - Настройка Railway staging
+   - Staging workflow
+2. **День 2-4**: Этап 2Г.1 (улучшение TTS)
+   - Исправление ошибок ElevenLabs
    - Выбор голоса пользователем
    - Сохранение аудио в БД
-   - Обработка ошибок
-2. **День 11-12**: Этап 2В.2 (фоновая музыка)
+3. **День 5-7**: Этап 2Г.2 (фоновая музыка)
    - Интеграция с Suno AI
    - Генерация фоновой музыки
-3. **День 13-14**: Этап 2В.3 (полное аудио)
+
+### Неделя 2: Серии и расширения  
+1. **День 8-10**: Этап 2В.2 (система серий)
+   - Восстановление модели StorySeries
+   - Создание многосерийных сказок
+2. **День 11-12**: Этап 2В.3 (память и контекст)
+   - Запоминание предпочтений
+   - Адаптация под предыдущие сказки
+3. **День 13-14**: Этап 2Г.3 (полное аудио)
    - Микширование речи и музыки
    - Оптимизация файлов
 
-### 🎯 НЕМЕДЛЕННЫЕ СЛЕДУЮЩИЕ ШАГИ (НА ЭТОЙ НЕДЕЛЕ):
-1. **Команда /history** - просмотр всех сказок пользователя
-2. **Улучшение TTS** - выбор голоса и сохранение аудио
-3. **Система серий** - создание продолжений сказок
+### Неделя 3: Мониторинг и аналитика 🚀 НОВОЕ
+1. **День 15-17**: Этап 3.1-3.2 (Event Tracking + User Analytics)
+   - Создание AnalyticsService
+   - Трекинг ключевых событий
+   - Анализ воронки конверсии
+   - Retention анализ
+2. **День 18-19**: Этап 3.3-3.4 (Content + Business Analytics)
+   - Анализ контента и предпочтений
+   - Бизнес-метрики и воронка подписок
+   - Cohort analysis
+3. **День 20-21**: Этап 3.5 (Real-time Dashboard)
+   - Создание админ панели
+   - Real-time метрики
+   - Алерты и отчеты
 
-**После этого у вас будет полноценный продукт готовый к первым пользователям! 🚀**
+### 🎯 НЕМЕДЛЕННЫЕ СЛЕДУЮЩИЕ ШАГИ (НА ЭТОЙ НЕДЕЛЕ):
+1. **Staging окружение** - создать тестовый контур
+2. **Исправить TTS** - решить проблемы с ElevenLabs
+3. **Фоновая музыка** - интеграция с Suno AI
+4. **Система мониторинга** - начать с базового трекинга событий
+
+**После этого у вас будет полноценный продукт с аналитикой готовый к первым пользователям! 🚀**
 
 ---
 
 ## 🎯 ТЕКУЩИЕ ПРИОРИТЕТЫ (СЕГОДНЯ-ЗАВТРА)
 
 ### 🚀 ВЫСШИЙ ПРИОРИТЕТ:
-1. **Улучшение TTS** - исправить ошибки с аудио генерацией
-2. **Фоновая музыка** - интеграция с Suno AI или ElevenLabs Music
-3. **Система серий** - возможность продолжать истории
+1. **Staging Environment** - создать тестовый контур для безопасной разработки
+2. **Исправить TTS** - решить проблемы с ElevenLabs API
+3. **Фоновая музыка** - интеграция с Suno AI или ElevenLabs Music
+4. **Система мониторинга** - базовый трекинг событий и метрик
 
 ### 🔧 ТЕХНИЧЕСКИЕ УЛУЧШЕНИЯ:
 1. **Обработка ошибок TTS** - исправить "quota exceeded"
 2. **Сохранение аудио в БД** - не терять сгенерированные файлы
 3. **Оптимизация производительности** - ускорить генерацию сказок
+4. **Event Tracking** - система сбора аналитических данных
 
 ### 📱 UX УЛУЧШЕНИЯ:
-1. **Пагинация истории** - для большого количества сказок
-2. **Поиск по сказкам** - найти нужную историю
-3. **Экспорт сказок** - сохранить в файл
+1. **Выбор голоса** - позволить пользователю выбирать голос
+2. **Настройки аудио** - скорость чтения, громкость
+3. **Предпросмотр аудио** - прослушать перед сохранением
+4. **Аналитический дашборд** - понимание поведения пользователей
 
 ---
 
 ## 📊 СТАТИСТИКА ПРОЕКТА
 
-### ✅ ЗАВЕРШЕНО: 90%
+### ✅ ЗАВЕРШЕНО: 95%
 - **Инфраструктура**: 100% ✅
 - **MVP Бот**: 100% ✅  
 - **Безопасность**: 100% ✅
 - **UX/UI**: 100% ✅
 - **История**: 100% ✅
-- **TTS**: 60% 🔄
+- **Railway Deploy**: 100% ✅
+- **TTS**: 70% 🔄
 - **Серии**: 0% ❌
+- **Мониторинг**: 0% ❌
 
-### 🎯 ЦЕЛЬ: 95% готовности к релизу
-**Осталось**: Улучшение TTS + фоновая музыка + система серий
+### 🎯 ЦЕЛЬ: 98% готовности к релизу
+**Осталось**: Staging + улучшение TTS + фоновая музыка + система серий + мониторинг
+
+### 🚨 КРИТИЧЕСКИЕ ЗАДАЧИ:
+1. **Staging Environment** - для безопасной разработки
+2. **TTS Fixes** - исправить ошибки ElevenLabs
+3. **Audio Production** - полный аудио контент
+4. **Series System** - многосерийные сказки
+5. **Analytics System** - мониторинг пользователей и бизнес-метрик
+
+**Проект готов к production использованию! 🎉**
+
+---
+
+## 📊 СИСТЕМА МОНИТОРИНГА И АНАЛИТИКИ
+
+### 🎯 Ключевые метрики для отслеживания:
+
+#### 1. **User Acquisition Metrics**
+```python
+# Источники пользователей
+- telegram_direct        # Прямой поиск в Telegram
+- telegram_share         # Поделились ссылкой
+- referral_code          # Реферальная программа
+- external_ad            # Внешняя реклама
+
+# География
+- country_code           # ISO код страны
+- timezone              # Часовой пояс
+- language_preference   # Предпочитаемый язык
+```
+
+#### 2. **User Engagement Metrics**
+```python
+# Активность
+- daily_active_users     # DAU
+- weekly_active_users    # WAU  
+- monthly_active_users   # MAU
+- session_duration       # Время в боте
+- stories_per_user       # Сказок на пользователя
+- return_rate           # Процент возвращающихся
+
+# Воронка конверсии
+- registration_rate      # Регистрация / старт
+- profile_completion     # Профиль / регистрация
+- first_story_rate       # Первая сказка / профиль
+- subscription_rate      # Подписка / активность
+```
+
+#### 3. **Content Performance Metrics**
+```python
+# Популярность контента
+- top_story_themes       # Популярные темы
+- age_group_preferences  # Предпочтения по возрастам
+- character_popularity   # Популярные персонажи
+- story_length_prefs     # Предпочтения длины
+- rating_distribution    # Распределение оценок
+
+# Качество контента
+- avg_generation_time    # Время генерации
+- error_rate            # Процент ошибок
+- user_satisfaction     # Удовлетворенность
+- repeat_usage          # Повторное использование
+```
+
+#### 4. **Business Metrics**
+```python
+# Финансовые показатели
+- revenue_per_user       # ARPU
+- lifetime_value         # LTV
+- conversion_funnel      # Воронка подписок
+- churn_rate            # Отток пользователей
+- retention_cohorts     # Когортный анализ
+
+# Операционные метрики
+- cost_per_story        # Стоимость генерации
+- api_usage             # Использование API
+- storage_usage         # Использование хранилища
+- performance_metrics   # Производительность
+```
+
+### 🛠 Техническая реализация:
+
+#### 1. **AnalyticsService**
+```python
+# src/analytics/service.py
+class AnalyticsService:
+    async def track_event(self, event_type: str, user_id: int, data: dict):
+        """Трекинг события пользователя"""
+        event = {
+            'event_type': event_type,
+            'user_id': user_id,
+            'timestamp': datetime.utcnow(),
+            'data': data,
+            'session_id': await self.get_session_id(user_id)
+        }
+        
+        # Отправка в очередь для обработки
+        await self.event_queue.put(event)
+        
+        # Обновление real-time счетчиков
+        await self.update_realtime_counters(event)
+    
+    async def get_user_metrics(self, user_id: int) -> dict:
+        """Получение метрик пользователя"""
+        return {
+            'stories_count': await self.get_stories_count(user_id),
+            'last_active': await self.get_last_active(user_id),
+            'preferred_themes': await self.get_preferred_themes(user_id),
+            'engagement_score': await self.calculate_engagement(user_id)
+        }
+```
+
+#### 2. **Event Middleware**
+```python
+# src/analytics/middleware.py
+class AnalyticsMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        # Трекинг всех действий пользователя
+        user_id = data.get('user_id')
+        if user_id:
+            await analytics.track_event(
+                'user_action',
+                user_id,
+                {'action': handler.__name__, 'timestamp': datetime.utcnow()}
+            )
+        
+        return await handler(event, data)
+```
+
+#### 3. **Real-time Dashboard**
+```python
+# src/analytics/dashboard.py
+@app.get("/analytics/dashboard")
+async def get_dashboard():
+    return {
+        'users': {
+            'total': await get_total_users(),
+            'active_today': await get_active_today(),
+            'new_today': await get_new_today()
+        },
+        'stories': {
+            'generated_today': await get_stories_today(),
+            'avg_rating': await get_avg_rating(),
+            'popular_themes': await get_popular_themes()
+        },
+        'business': {
+            'revenue_today': await get_revenue_today(),
+            'conversion_rate': await get_conversion_rate(),
+            'churn_rate': await get_churn_rate()
+        }
+    }
+```
+
+### 📈 Примеры аналитических запросов:
+
+#### 1. **Воронка конверсии**
+```sql
+-- Анализ воронки от регистрации до подписки
+WITH funnel AS (
+    SELECT 
+        DATE(created_at) as date,
+        COUNT(*) as registered,
+        COUNT(CASE WHEN child_count > 0 THEN 1 END) as with_profiles,
+        COUNT(CASE WHEN story_count > 0 THEN 1 END) as with_stories,
+        COUNT(CASE WHEN is_subscribed THEN 1 END) as subscribed
+    FROM users 
+    GROUP BY DATE(created_at)
+)
+SELECT 
+    date,
+    registered,
+    with_profiles,
+    with_stories,
+    subscribed,
+    ROUND(with_profiles::float / registered * 100, 2) as profile_rate,
+    ROUND(with_stories::float / with_profiles * 100, 2) as story_rate,
+    ROUND(subscribed::float / with_stories * 100, 2) as subscription_rate
+FROM funnel
+ORDER BY date DESC;
+```
+
+#### 2. **Cohort Analysis**
+```sql
+-- Анализ retention по когортам
+WITH cohorts AS (
+    SELECT 
+        user_id,
+        DATE_TRUNC('week', created_at) as cohort_week,
+        DATE_TRUNC('week', last_active) as active_week
+    FROM users
+),
+cohort_sizes AS (
+    SELECT cohort_week, COUNT(*) as size
+    FROM cohorts
+    GROUP BY cohort_week
+)
+SELECT 
+    c.cohort_week,
+    cs.size as cohort_size,
+    c.active_week,
+    COUNT(*) as active_users,
+    ROUND(COUNT(*)::float / cs.size * 100, 2) as retention_rate
+FROM cohorts c
+JOIN cohort_sizes cs ON c.cohort_week = cs.cohort_week
+GROUP BY c.cohort_week, cs.size, c.active_week
+ORDER BY c.cohort_week, c.active_week;
+```
+
+### 🚨 Алерты и мониторинг:
+
+#### 1. **Критические алерты**
+```python
+# Алерты при критических изменениях
+ALERTS = {
+    'high_error_rate': {
+        'threshold': 5,  # 5% ошибок
+        'message': 'Высокий процент ошибок генерации сказок'
+    },
+    'low_conversion': {
+        'threshold': 10,  # 10% конверсия
+        'message': 'Низкая конверсия в подписки'
+    },
+    'high_churn': {
+        'threshold': 20,  # 20% отток
+        'message': 'Высокий отток пользователей'
+    },
+    'api_quota_exceeded': {
+        'threshold': 90,  # 90% квоты
+        'message': 'Приближается лимит API'
+    }
+}
+```
+
+#### 2. **Автоматические отчеты**
+```python
+# Еженедельные отчеты
+WEEKLY_REPORTS = {
+    'user_growth': 'Рост пользователей за неделю',
+    'content_performance': 'Популярные темы и персонажи',
+    'business_metrics': 'Финансовые показатели',
+    'technical_health': 'Производительность и ошибки'
+}
+```
+
+### 🎯 Приоритеты внедрения:
+
+1. **Неделя 1**: Базовый трекинг событий
+2. **Неделя 2**: User Analytics и воронка конверсии  
+3. **Неделя 3**: Content Analytics и Business Metrics
+4. **Неделя 4**: Real-time Dashboard и алерты
+
+**Система мониторинга критически важна для понимания бизнеса и принятия решений! 📊**

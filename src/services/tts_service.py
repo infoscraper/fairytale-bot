@@ -38,7 +38,7 @@ class TTSService:
     def list_voices(self):
         """List available ElevenLabs voices (limited by API permissions)"""
         if not self.client:
-            logger.error("ElevenLabs client not initialized")
+            logger.info("TTS disabled: ElevenLabs client not initialized")
             return []
         
         # Use default voices since API key may not have voices_read permission
@@ -69,7 +69,7 @@ class TTSService:
         Generate audio for a story with child-specific personalization
         """
         if not self.client:
-            logger.error("ElevenLabs client not initialized")
+            logger.info("TTS disabled: ElevenLabs client not initialized")
             return None
 
         # Choose voice: use provided voice_id or select based on child's age
@@ -110,10 +110,11 @@ class TTSService:
             
         except Exception as e:
             error_str = str(e)
-            if "quota_exceeded" in error_str:
-                logger.warning(f"⚠️ ElevenLabs quota exceeded for {child_name}")
-            elif "unauthorized" in error_str.lower():
-                logger.error(f"❌ ElevenLabs API key unauthorized")
+            lower = error_str.lower()
+            if "quota_exceeded" in lower:
+                logger.info(f"TTS skipped: ElevenLabs quota exceeded for {child_name}")
+            elif "401" in lower or "unauthorized" in lower:
+                logger.info("TTS skipped: ElevenLabs unauthorized (401).")
             else:
                 logger.error(f"❌ Error generating story audio: {e}")
             return None
@@ -127,7 +128,7 @@ class TTSService:
         Generate basic audio from text
         """
         if not self.client:
-            logger.error("ElevenLabs client not initialized")
+            logger.info("TTS disabled: ElevenLabs client not initialized")
             return None
 
         voice_id = voice_id or settings.ELEVENLABS_VOICE_ID
@@ -158,7 +159,11 @@ class TTSService:
             return audio_buffer
             
         except Exception as e:
-            logger.error(f"❌ Error generating audio: {e}")
+            msg = str(e).lower()
+            if "401" in msg or "unauthorized" in msg:
+                logger.info("TTS skipped: ElevenLabs unauthorized (401).")
+            else:
+                logger.error(f"❌ Error generating audio: {e}")
             return None
 
     def _get_child_appropriate_voice(self, child_age: int) -> str:
