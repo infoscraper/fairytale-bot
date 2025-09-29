@@ -3,6 +3,7 @@
 Fairytale Bot - Entry point
 """
 import asyncio
+import uuid
 import logging
 import os
 import sys
@@ -92,8 +93,48 @@ async def main():
             logger.warning(f"🤚 Polling disabled. ENVIRONMENT={settings.ENVIRONMENT}, BOT_ROLE={settings.BOT_ROLE}")
             return
 
-        # Start polling
-        await dp.start_polling(bot)
+        # Acquire distributed lock to ensure a single poller
+        lock_key = f"bot:poller_lock:{settings.TELEGRAM_BOT_TOKEN[:8]}"
+        lock_value = str(uuid.uuid4())
+        got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+        if not got_lock:
+            logger.warning("🔒 Another instance holds poller lock. Exiting without polling.")
+            return
+
+        # Background task to renew lock TTL
+        renew_task = None
+        async def _renew_lock():
+            try:
+                while True:
+                    await asyncio.sleep(60)
+                    try:
+                        current = await redis.get(lock_key)
+                        if current == lock_value:
+                            await redis.expire(lock_key, 120)
+                        else:
+                            logger.warning("🔓 Poller lock lost to another instance. Stopping polling.")
+                            await dp.stop_polling()
+                            break
+                    except Exception as e:
+                        logger.error(f"❌ Error renewing poller lock: {e}")
+            except asyncio.CancelledError:
+                pass
+
+        renew_task = asyncio.create_task(_renew_lock())
+
+        try:
+            # Start polling
+            await dp.start_polling(bot)
+        finally:
+            if renew_task:
+                renew_task.cancel()
+            # Release lock if still owned
+            try:
+                current = await redis.get(lock_key)
+                if current == lock_value:
+                    await redis.delete(lock_key)
+            except Exception as e:
+                logger.error(f"❌ Error releasing poller lock: {e}")
         
     except Exception as e:
         logger.error(f"❌ Error starting bot: {e}")
