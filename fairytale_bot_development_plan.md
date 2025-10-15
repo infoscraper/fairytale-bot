@@ -3,12 +3,12 @@
 ## 🎯 Общая стратегия
 
 **Цель:** Создать MVP сказочного бота с полной инфраструктурой для дальнейшего масштабирования  
-**Окружение:** Локальная разработка с Docker Desktop + Railway для продакшена  
+**Окружение (обновлено):** Локальная разработка с Docker Desktop + Dokploy на собственном сервере для staging/production  
 **Исключения:** Платежи и подписки (интеграция позже)
 
 ---
 
-## 📋 ЭТАП 0: Подготовка инфраструктуры
+## 📋 ЭТАП 0: Подготовка инфраструктуры (обновлено под Dokploy)
 
 ### 0.1 Настройка базового окружения
 
@@ -28,11 +28,9 @@ fairytale_bot/
 ├── Dockerfile
 ├── requirements.txt
 ├── alembic.ini
-├── Procfile                    # Railway deployment
-├── railway.json               # Railway configuration
-├── railway.toml               # Railway environment config
-├── nixpacks.toml              # Railway build optimization
-├── RAILWAY_DEPLOYMENT.md      # Railway deployment guide
+├── Procfile                    # Авто‑инициализация Google creds (для Railway/Dokploy)
+├── nixpacks.toml              # (опционально/legacy, если используете Nixpacks)
+├── RAILWAY_DEPLOYMENT.md      # Legacy: Railway deployment guide
 ├── src/
 │   ├── __init__.py
 │   ├── main.py
@@ -46,20 +44,19 @@ fairytale_bot/
 
 #### 0.1.2 Базовые конфигурационные файлы
 
-**Создаем `.env.example`:**
+**Создаем `.env.example` (актуально для Dokploy):**
 ```env
-# Database (Railway автоматически создаст PostgreSQL)
-DATABASE_URL=postgresql+asyncpg://postgres:password@containers-us-west-xxx.railway.app:5432/railway
+# Database
 # Для локальной разработки:
 # DATABASE_URL=postgresql+asyncpg://fairytale_user:fairytale_pass@localhost:5432/fairytale_db
-# POSTGRES_USER=fairytale_user
-# POSTGRES_PASSWORD=fairytale_pass
-# POSTGRES_DB=fairytale_db
+# Для Dokploy (пример):
+# DATABASE_URL=postgresql://fairytalebot:YOUR_PG_PASS@PG_INTERNAL_HOST:5432/fairytalebot_staging
 
-# Redis (Railway автоматически создаст Redis)
-REDIS_URL=redis://default:password@containers-us-west-xxx.railway.app:6379
+# Redis
 # Для локальной разработки:
 # REDIS_URL=redis://localhost:6380/0
+# Для Dokploy (пример):
+# REDIS_URL=redis://default:YOUR_REDIS_PASS@REDIS_INTERNAL_HOST:6379/0
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=your_bot_token_here
@@ -77,12 +74,14 @@ ELEVENLABS_SIMILARITY_BOOST=0.85
 ELEVENLABS_STYLE=0.2
 ELEVENLABS_USE_SPEAKER_BOOST=True
 
-# Google Text-to-Speech (альтернатива ElevenLabs)
-GOOGLE_APPLICATION_CREDENTIALS=path/to/your/service-account-key.json
-GOOGLE_CLOUD_PROJECT_ID=your-gcp-project-id
-GOOGLE_TTS_VOICE_NAME=ru-RU-Standard-A
-GOOGLE_TTS_VOICE_GENDER=FEMALE
-GOOGLE_TTS_AUDIO_ENCODING=MP3
+# Gemini TTS (Google Cloud Text-to-Speech)
+# В Dokploy используем GOOGLE_APPLICATION_CREDENTIALS_JSON (весь JSON одной строкой)
+GOOGLE_APPLICATION_CREDENTIALS_JSON={...}
+TTS_PROVIDER=gemini
+GEMINI_TTS_MODEL=gemini-2.5-flash-tts
+GEMINI_TTS_VOICE=Algieba
+GEMINI_TTS_LANGUAGE=ru-ru
+GEMINI_TTS_MAX_BYTES_PER_CHUNK=800
 
 # Environment
 ENVIRONMENT=development
@@ -219,7 +218,7 @@ isort==5.13.2
 
 #### 0.2.2 Базовый Python контейнер
 
-**Создаем `Dockerfile`:**
+**Создаем `Dockerfile` (совместимо с Dokploy):**
 ```dockerfile
 FROM python:3.11-slim
 
@@ -237,6 +236,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем код
 COPY src/ ./src/
 COPY alembic.ini .
+COPY alembic/ ./alembic/
 COPY alembic/ ./alembic/
 
 # Создаем пользователя
@@ -526,14 +526,14 @@ print(f'Result: {result.get(timeout=10)}')
 
 ---
 
-## 📋 ЭТАП 0.5: Railway Deployment Setup
+## 📋 ЭТАП 0.5: Dokploy Deployment Setup (обновлено)
 
-### 0.5.1 Railway Configuration Files
+### 0.5.1 Конфигурация запуска
 
-**Создаем `Procfile`:**
+**Procfile (автозапись Google creds при старте):**
 ```
-web: python -m src.main
-worker: celery -A src.core.celery_app worker --loglevel=info
+web: bash -lc 'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gsa.json 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gsa.json}; python -m src.main'
+worker: bash -lc 'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gsa.json 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gsa.json}; celery -A src.core.celery_app worker --loglevel=info'
 ```
 
 **Создаем `railway.json`:**
@@ -583,52 +583,43 @@ cmds = [
 cmd = "python -m src.main"
 ```
 
-### 0.5.2 Railway Environment Variables
+### 0.5.2 Переменные окружения для Dokploy
 
-**Обязательные переменные для Railway:**
 ```env
-# Database (Railway автоматически создаст)
-DATABASE_URL=postgresql+asyncpg://postgres:password@containers-us-west-xxx.railway.app:5432/railway
+ENVIRONMENT=staging
+BOT_ROLE=poller
 
-# Redis (Railway автоматически создаст)
-REDIS_URL=redis://default:password@containers-us-west-xxx.railway.app:6379
+# Postgres (пример)
+DATABASE_URL=postgresql://fairytalebot:YOUR_PG_PASS@PG_INTERNAL_HOST:5432/fairytalebot_staging
+
+# Redis (пример)
+REDIS_URL=redis://default:YOUR_REDIS_PASS@REDIS_INTERNAL_HOST:6379/0
 
 # Telegram Bot
-TELEGRAM_BOT_TOKEN=your_production_bot_token
+TELEGRAM_BOT_TOKEN=your_staging_bot_token
 
 # OpenAI
 OPENAI_API_KEY=your_openai_key
+OPENAI_MODEL=gpt-4o-mini
 
-# ElevenLabs
-ELEVENLABS_API_KEY=your_elevenlabs_key
-
-# Environment
-ENVIRONMENT=production
-DEBUG=False
+# Gemini TTS
+TTS_PROVIDER=gemini
+GOOGLE_APPLICATION_CREDENTIALS_JSON={...}
+GEMINI_TTS_MODEL=gemini-2.5-flash-tts
+GEMINI_TTS_VOICE=Algieba
+GEMINI_TTS_LANGUAGE=ru-ru
+GEMINI_TTS_MAX_BYTES_PER_CHUNK=800
 ```
 
-### 0.5.3 Railway Deployment Process
+### 0.5.3 Процесс деплоя в Dokploy
 
-**Шаги деплоя:**
-1. Создать проект в Railway Dashboard
-2. Добавить PostgreSQL и Redis сервисы
-3. Настроить переменные окружения
-4. Подключить GitHub репозиторий
-5. Настроить автоматический деплой
+Шаги:
+1. Подключить GitHub, выбрать репозиторий `fairytale-bot`, ветку `feature/gemini-tts-integration`
+2. Build Type: Dockerfile; Docker File: `Dockerfile`; Docker Context Path: `/`
+3. Заполнить переменные окружения (см. 0.5.2)
+4. Нажать Save → Clean Cache → Deploy
 
-**Команды для деплоя:**
-```bash
-# Подготовка к деплою
-git add .
-git commit -m "Prepare for Railway deployment"
-git push origin main
-
-# Проверка деплоя
-railway logs
-railway status
-```
-
-### 0.5.4 Railway Lessons Learned
+### 0.5.4 Уроки деплоя (Dokploy/Railway)
 
 **Критические ошибки и их решения:**
 
@@ -641,12 +632,12 @@ railway status
    - Решение: Остановить все локальные экземпляры, проверить webhook в BotFather
 
 3. **Database Connection Issues**:
-   - Проблема: Неправильный DATABASE_URL формат
-   - Решение: Использовать postgresql+asyncpg:// вместо postgresql://
+   - Проблема: Неверные креды/хост для staging
+   - Решение: Использовать Internal Host из Dokploy; строка `postgresql://user:pass@host:5432/db` (драйвер asyncpg подменяется в коде)
 
-4. **Redis Compatibility Issues**:
-   - Проблема: Redis 5.x vs 4.x API различия
-   - Решение: Использовать redis[hiredis]==4.6.0 для совместимости
+4. **Redis Credentials**:
+   - Проблема: invalid username-password pair
+   - Решение: REDIS_URL вида `redis://default:pass@host:6379/0` (пароль из Dokploy)
 
 5. **Alembic Migration Issues**:
    - Проблема: Миграции не применяются на Railway
