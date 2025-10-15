@@ -36,9 +36,10 @@ async def init_database():
     logger.info("🔄 Initializing database...")
     
     try:
-        # Check if we're in Railway environment
-        if os.getenv("RAILWAY_ENVIRONMENT"):
-            logger.info("🚂 Running in Railway environment, creating tables...")
+        # Platform-agnostic auto-migration toggle (works for Dokploy, Railway, etc.)
+        auto_migrate = os.getenv("AUTO_MIGRATE", "0") == "1"
+        if auto_migrate:
+            logger.info("🗄️ AUTO_MIGRATE=1 → creating tables if not exist...")
             
             # Import database components
             from .core.database import engine
@@ -50,19 +51,19 @@ async def init_database():
             
             logger.info("✅ Database tables created successfully!")
         else:
-            logger.info("🏠 Running locally, skipping automatic migrations")
+            logger.info("⏭️ AUTO_MIGRATE is disabled — skipping automatic migrations")
             
     except Exception as e:
         logger.error(f"❌ Error initializing database: {e}")
         # Don't exit in production, just log the error
-        if not os.getenv("RAILWAY_ENVIRONMENT"):
+        if not (os.getenv("AUTO_MIGRATE", "0") == "1"):
             raise
 
 
 async def main():
     """Main function to start the bot"""
     
-    # Initialize database first (only in Railway)
+    # Initialize database first (when AUTO_MIGRATE=1)
     await init_database()
     
     # Initialize bot with default properties
