@@ -42,8 +42,9 @@ async def start_new_story(
         f"или предложите свою:",
         reply_markup=keyboard
     )
-    
-    await callback.answer()
+    # Do NOT answer the callback here again — it was already answered at the start
+    # A repeated answer after long processing causes TelegramBadRequest: query is too old
+    pass
 
 
 @router.callback_query(F.data.startswith("theme_"))
