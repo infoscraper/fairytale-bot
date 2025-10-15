@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     ELEVENLABS_STYLE: float = 0.2  # Voice style exaggeration (0.0-1.0)
     ELEVENLABS_USE_SPEAKER_BOOST: bool = True  # Enhance speaker clarity
     
+    # TTS Provider selection: "elevenlabs" | "gemini"
+    TTS_PROVIDER: str = "elevenlabs"
+    
+    # Gemini TTS (Google Cloud Text-to-Speech) settings
+    GEMINI_TTS_MODEL: str = "gemini-2.5-flash-tts"
+    GEMINI_TTS_VOICE: str = "Algieba"
+    GEMINI_TTS_LANGUAGE: str = "ru-ru"
+    GEMINI_TTS_MAX_BYTES_PER_CHUNK: int = 800
+    
     # Environment
     ENVIRONMENT: str = "development"
     DEBUG: bool = True

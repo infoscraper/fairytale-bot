@@ -1,13 +1,19 @@
 """
-ElevenLabs Text-to-Speech service for generating high-quality audio from stories
+Text-to-Speech service for generating audio from stories.
+Supports ElevenLabs and Gemini TTS (Google Cloud Text-to-Speech).
 """
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, List
 from io import BytesIO
+import shutil
+import subprocess
 
 from elevenlabs.client import ElevenLabs
 from elevenlabs import Voice, VoiceSettings
+
+from google.api_core.client_options import ClientOptions
+from google.cloud import texttospeech_v1beta1 as texttospeech
 
 from ..core.config import settings
 
@@ -15,25 +21,34 @@ logger = logging.getLogger(__name__)
 
 
 class TTSService:
-    """Service for converting text to speech using ElevenLabs"""
+    """Service for converting text to speech using configured provider."""
 
     def __init__(self):
-        """Initialize ElevenLabs Text-to-Speech client"""
         self.client = None
-        self._initialize_client()
-
-    def _initialize_client(self):
-        """Initialize ElevenLabs client"""
+        self.gemini_client = None
+        self._initialize_clients()
+    
+    def _initialize_clients(self):
+        """Initialize provider clients based on configuration"""
+        # ElevenLabs
         try:
             if settings.ELEVENLABS_API_KEY:
                 self.client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
                 logger.info("✅ ElevenLabs TTS client initialized successfully")
-            else:
-                logger.warning("⚠️ ELEVENLABS_API_KEY not set. TTS will not be available.")
-                self.client = None
         except Exception as e:
             logger.error(f"❌ Error initializing ElevenLabs TTS client: {e}")
             self.client = None
+
+        # Gemini TTS
+        try:
+            api_endpoint = "texttospeech.googleapis.com"
+            self.gemini_client = texttospeech.TextToSpeechClient(
+                client_options=ClientOptions(api_endpoint=api_endpoint)
+            )
+            logger.info("✅ Gemini TTS client initialized successfully")
+        except Exception as e:
+            logger.warning(f"⚠️ Gemini TTS client not available: {e}")
+            self.gemini_client = None
 
     def list_voices(self):
         """List available ElevenLabs voices (limited by API permissions)"""
@@ -68,6 +83,15 @@ class TTSService:
         """
         Generate audio for a story with child-specific personalization
         """
+        if settings.TTS_PROVIDER == "gemini":
+            logger.info("🎙️ Using Gemini TTS provider for story generation")
+            return await self._gemini_generate_long_audio(
+                text=f"Привет, {child_name}! Специально для тебя - новая сказка!\n\n{story_text}",
+                prompt="Расскажи сказку спокойным добрым голосом для ребенка. Используй интонации.",
+                output_basename="story"
+            )
+
+        # Default: ElevenLabs
         if not self.client:
             logger.info("TTS disabled: ElevenLabs client not initialized")
             return None
@@ -127,6 +151,14 @@ class TTSService:
         """
         Generate basic audio from text
         """
+        if settings.TTS_PROVIDER == "gemini":
+            logger.info("🎙️ Using Gemini TTS provider for basic synthesis")
+            return await self._gemini_generate_long_audio(
+                text=text,
+                prompt="Скажи это спокойным, добрым голосом для ребенка.",
+                output_basename="tts"
+            )
+
         if not self.client:
             logger.info("TTS disabled: ElevenLabs client not initialized")
             return None
@@ -165,6 +197,135 @@ class TTSService:
             else:
                 logger.error(f"❌ Error generating audio: {e}")
             return None
+
+    # ---------- Gemini TTS ----------
+    def _split_text_into_byte_chunks(self, source_text: str, max_bytes: int) -> List[str]:
+        if not source_text:
+            return []
+        sentences: List[str] = []
+        buf = ""
+        for ch in source_text:
+            buf += ch
+            if ch in ".!?…\n":
+                sentences.append(buf.strip())
+                buf = ""
+        if buf.strip():
+            sentences.append(buf.strip())
+
+        chunks: List[str] = []
+        cur = ""
+        for s in sentences:
+            if len(s.encode("utf-8")) > max_bytes:
+                start = 0
+                while start < len(s):
+                    lo, hi = 1, len(s) - start
+                    best = 1
+                    while lo <= hi:
+                        mid = (lo + hi) // 2
+                        part = s[start : start + mid]
+                        if len(part.encode("utf-8")) <= max_bytes:
+                            best = mid
+                            lo = mid + 1
+                        else:
+                            hi = mid - 1
+                    chunks.append(s[start : start + best])
+                    start += best
+                continue
+
+            tentative = (cur + (" " if cur else "") + s).strip()
+            if tentative and len(tentative.encode("utf-8")) <= max_bytes:
+                cur = tentative
+            else:
+                if cur:
+                    chunks.append(cur)
+                cur = s
+        if cur:
+            chunks.append(cur)
+        return chunks
+
+    async def _gemini_generate_long_audio(self, text: str, prompt: str, output_basename: str) -> Optional[BytesIO]:
+        if not self.gemini_client:
+            logger.info("TTS disabled: Gemini client not initialized")
+            return None
+
+        model = settings.GEMINI_TTS_MODEL
+        voice_name = settings.GEMINI_TTS_VOICE
+        language_code = settings.GEMINI_TTS_LANGUAGE
+        max_bytes = settings.GEMINI_TTS_MAX_BYTES_PER_CHUNK
+
+        voice = texttospeech.VoiceSelectionParams(
+            name=voice_name,
+            language_code=language_code,
+            model_name=model,
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+
+        chunks = self._split_text_into_byte_chunks(text, max_bytes=max_bytes)
+        if not chunks:
+            return None
+
+        part_paths: List[str] = []
+        for idx, chunk in enumerate(chunks, start=1):
+            synthesis_input = texttospeech.SynthesisInput(text=chunk, prompt=prompt)
+            response = self.gemini_client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice,
+                audio_config=audio_config,
+            )
+            part_path = f"{output_basename}_part{idx:02d}.mp3"
+            with open(part_path, "wb") as f:
+                f.write(response.audio_content)
+            part_paths.append(part_path)
+
+        # Merge if multiple parts
+        if len(part_paths) == 1:
+            with open(part_paths[0], "rb") as f:
+                data = f.read()
+            buf = BytesIO(data)
+            buf.seek(0)
+            return buf
+
+        if shutil.which("ffmpeg"):
+            manifest = "parts.txt"
+            with open(manifest, "w", encoding="utf-8") as mf:
+                for p in part_paths:
+                    mf.write(f"file '{p}'\n")
+            out_path = f"{output_basename}.mp3"
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        manifest,
+                        "-c",
+                        "copy",
+                        out_path,
+                    ],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                with open(out_path, "rb") as f:
+                    data = f.read()
+                buf = BytesIO(data)
+                buf.seek(0)
+                return buf
+            except subprocess.CalledProcessError as e:
+                logger.error(f"❌ ffmpeg merge failed: {e}")
+
+        # Fallback: return first part only if no merge available
+        with open(part_paths[0], "rb") as f:
+            data = f.read()
+        buf = BytesIO(data)
+        buf.seek(0)
+        return buf
 
     def _get_child_appropriate_voice(self, child_age: int) -> str:
         """

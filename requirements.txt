@@ -18,6 +18,7 @@ celery[redis]==5.3.4
 # AI Services
 openai>=1.50.0
 httpx==0.24.1
+google-cloud-texttospeech>=2.31.0
 
 # ElevenLabs Text-to-Speech
 elevenlabs==2.16.0
