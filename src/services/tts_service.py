@@ -277,21 +277,30 @@ class TTSService:
         )
 
         chunks = self._split_text_into_byte_chunks(text, max_bytes=max_bytes)
+        logger.info(f"🔎 Gemini TTS: chunks prepared = {len(chunks)} (max_bytes={max_bytes})")
         if not chunks:
             return None
 
         part_paths: List[str] = []
         for idx, chunk in enumerate(chunks, start=1):
-            synthesis_input = texttospeech.SynthesisInput(text=chunk, prompt=prompt)
-            response = self.gemini_client.synthesize_speech(
-                input=synthesis_input,
-                voice=voice,
-                audio_config=audio_config,
-            )
-            part_path = f"{output_basename}_part{idx:02d}.mp3"
-            with open(part_path, "wb") as f:
-                f.write(response.audio_content)
-            part_paths.append(part_path)
+            try:
+                synthesis_input = texttospeech.SynthesisInput(text=chunk, prompt=prompt)
+                response = self.gemini_client.synthesize_speech(
+                    input=synthesis_input,
+                    voice=voice,
+                    audio_config=audio_config,
+                )
+                size = len(response.audio_content or b"")
+                logger.info(f"🎚️ Gemini TTS: part {idx}/{len(chunks)} synthesized, bytes={size}")
+                if size == 0:
+                    logger.warning("⚠️ Gemini TTS returned empty audio_content")
+                part_path = f"{output_basename}_part{idx:02d}.mp3"
+                with open(part_path, "wb") as f:
+                    f.write(response.audio_content)
+                part_paths.append(part_path)
+            except Exception as e:
+                logger.error(f"❌ Gemini TTS synthesis failed on part {idx}: {e}")
+                return None
 
         # Merge if multiple parts
         if len(part_paths) == 1:
@@ -332,7 +341,7 @@ class TTSService:
                 buf.seek(0)
                 return buf
             except subprocess.CalledProcessError as e:
-                logger.error(f"❌ ffmpeg merge failed: {e}")
+                logger.error(f"❌ ffmpeg merge failed: {e}\nstderr={e.stderr.decode(errors='ignore') if e.stderr else ''}")
 
         # Fallback: return first part only if no merge available
         with open(part_paths[0], "rb") as f:
