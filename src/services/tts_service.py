@@ -8,6 +8,7 @@ from typing import Optional, List
 from io import BytesIO
 import shutil
 import subprocess
+import os
 
 from elevenlabs.client import ElevenLabs
 from elevenlabs import Voice, VoiceSettings
@@ -41,6 +42,19 @@ class TTSService:
 
         # Gemini TTS
         try:
+            # Ensure Google credentials are available even without Procfile
+            creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            if not creds_path and creds_json:
+                temp_path = "/tmp/gsa.json"
+                try:
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        f.write(creds_json)
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+                    logger.info("🔐 Wrote Google credentials JSON to /tmp/gsa.json for Gemini TTS")
+                except Exception as write_err:
+                    logger.warning(f"⚠️ Could not write GOOGLE_APPLICATION_CREDENTIALS_JSON: {write_err}")
+
             api_endpoint = "texttospeech.googleapis.com"
             self.gemini_client = texttospeech.TextToSpeechClient(
                 client_options=ClientOptions(api_endpoint=api_endpoint)
