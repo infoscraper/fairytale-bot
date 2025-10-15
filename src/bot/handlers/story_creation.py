@@ -126,6 +126,7 @@ async def handle_theme_selection(
         # Generate audio with Charlotte's voice
         print(f"🎙️ Starting TTS generation...")
         tts_service = TTSService()
+        print(f"🔧 TTS service created, calling generate_audio_for_story...")
         audio_buffer = await tts_service.generate_audio_for_story(
             story_text=story.story_text,
             child_name=story.child_name,
@@ -238,7 +239,8 @@ async def handle_theme_selection(
                  "Попробуйте еще раз через минуту."
         )
     
-    await callback.answer()
+    # Do NOT answer the callback here again — it was already answered at the start
+    # A repeated answer after long processing causes TelegramBadRequest: query is too old
 
 
 @router.callback_query(F.data.startswith("custom_theme_"))
