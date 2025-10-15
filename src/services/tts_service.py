@@ -97,9 +97,12 @@ class TTSService:
         """
         Generate audio for a story with child-specific personalization
         """
-        logger.info(f"🔧 TTS_PROVIDER setting: '{settings.TTS_PROVIDER}'")
+        # Use print to guarantee visibility even if logger filters out module logs in prod
+        print(f"🔧 TTS_PROVIDER setting: '{settings.TTS_PROVIDER}'")
         if settings.TTS_PROVIDER == "gemini":
             logger.info("🎙️ Using Gemini TTS provider for story generation")
+            if not self.gemini_client:
+                print("⚠️ Gemini client is not initialized — will return None")
             return await self._gemini_generate_long_audio(
                 text=f"Привет, {child_name}! Специально для тебя - новая сказка!\n\n{story_text}",
                 prompt="Расскажи сказку спокойным добрым голосом для ребенка. Используй интонации.",
@@ -108,7 +111,7 @@ class TTSService:
 
         # Default: ElevenLabs
         if not self.client:
-            logger.info("TTS disabled: ElevenLabs client not initialized")
+            print("TTS disabled: ElevenLabs client not initialized (falling back to None)")
             return None
 
         # Choose voice: use provided voice_id or select based on child's age
