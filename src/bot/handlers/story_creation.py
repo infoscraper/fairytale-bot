@@ -97,16 +97,51 @@ async def handle_theme_selection(
         selected_theme=theme
     )
     
-    # Show progress message
-    import time
+    # Show immediate response and start background task
     progress_message = await callback.message.edit_text(
-        f"🎭 Создаю волшебную сказку...\n"
-        f"✨ Это займет около минуты\n\n"
-        f"🔮 Придумываю историю... {int(time.time()) % 1000}"
+        f"🎭 Создаю волшебную сказку для {child.name}!\n\n"
+        f"✨ Тема: {theme or 'сюрприз'}\n"
+        f"⏱️ Это займет 30-60 секунд\n\n"
+        f"🔮 Начинаю работу..."
     )
     
+    # Start background story generation
+    from ...tasks.story_tasks import generate_story_async
+    
     try:
-        # Generate story
+        # Launch async task
+        task_result = generate_story_async.delay(
+            child_id=child_id,
+            theme=theme if theme != "random" else None,
+            user_id=current_user.id,
+            message_id=progress_message.message_id,
+            chat_id=callback.message.chat.id
+        )
+        
+        # Immediate response to user
+        await callback.message.edit_text(
+            f"✅ Сказка для {child.name} запущена в работу!\n\n"
+            f"🎭 Тема: {theme or 'сюрприз'}\n"
+            f"⏱️ Ожидайте 30-60 секунд\n\n"
+            f"🤖 Я пришлю готовую сказку, как только закончу!\n"
+            f"📱 Можете пользоваться ботом дальше."
+        )
+        
+        # Clear state
+        await state.clear()
+        return
+        
+    except Exception as e:
+        # Fallback to synchronous generation
+        print(f"⚠️ Celery not available, falling back to sync generation: {e}")
+        
+        progress_message = await callback.message.edit_text(
+            f"🎭 Создаю волшебную сказку...\n"
+            f"✨ Это займет около минуты\n\n"
+            f"🔮 Придумываю историю..."
+        )
+        
+        # Generate story synchronously as fallback
         print(f"🏗️ Starting story creation for child_id: {child_id}")
         story_service = StoryService(session)
         story = await story_service.create_story(

@@ -2,12 +2,17 @@
 from .database import DatabaseMiddleware
 from .user_context import UserContextMiddleware
 from .content_safety import ContentSafetyMiddleware, ThemeValidationMiddleware
+from .timeout_middleware import TimeoutMiddleware
 
 
 def setup_middlewares(dp):
     """Setup all middlewares"""
     
-    # Database session middleware (should be first)
+    # Timeout middleware (should be first to wrap everything)
+    dp.message.middleware(TimeoutMiddleware(timeout=30))
+    dp.callback_query.middleware(TimeoutMiddleware(timeout=30))
+    
+    # Database session middleware (should be second)
     dp.message.middleware(DatabaseMiddleware())
     dp.callback_query.middleware(DatabaseMiddleware())
     
