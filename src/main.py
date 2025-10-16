@@ -112,8 +112,21 @@ async def main():
             ttl = await redis.ttl(lock_key)
             
             if current_value and ttl > 0:
-                logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Exiting without polling.")
-                return
+                if ttl > 90:  # Lock was just renewed, respect it
+                    logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Exiting without polling.")
+                    return
+                else:
+                    # Lock is expiring soon, might be from a dying process
+                    logger.info(f"🕐 Lock expires soon (TTL: {ttl}s). Waiting for expiration...")
+                    await asyncio.sleep(ttl + 5)  # Wait for lock to expire
+                    
+                    # Try to claim the lock after expiration
+                    got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+                    if got_lock:
+                        logger.info("✅ Successfully claimed lock after expiration!")
+                    else:
+                        logger.warning("❌ Failed to claim lock after expiration. Another instance got it first.")
+                        return
             elif ttl <= 0:
                 logger.info("🧹 Found expired lock, attempting to claim it...")
                 # Try to delete the old lock and set a new one
