@@ -22,8 +22,8 @@ COPY alembic/ ./alembic/
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import asyncio; import aiohttp; asyncio.run(aiohttp.ClientSession().get('https://api.telegram.org').close())" || exit 1
+# Health check - simple process check (works for both bot and worker)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD pgrep -f "python -m src.main|celery.*worker" > /dev/null || exit 1
 
 CMD ["python", "-m", "src.main"]

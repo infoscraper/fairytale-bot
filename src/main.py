@@ -155,10 +155,9 @@ async def main():
             
             if current_value and ttl > 0:
                 if ttl > 60:  # Lock was recently renewed, respect it
-                    logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Exiting without polling.")
-                    logger.warning("💡 This usually means multiple bot instances are running!")
-                    logger.warning("🔧 Check Dokploy configuration: Replicas should be = 1")
-                    logger.info("🔄 Switching to worker mode...")
+                    logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Switching to worker mode.")
+                    logger.info("💡 Another instance is polling. This instance will work as Celery worker.")
+                    logger.info("🔄 Starting worker mode...")
                     await start_worker_mode()
                     return
                 else:
