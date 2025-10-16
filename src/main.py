@@ -7,6 +7,7 @@ import uuid
 import logging
 import os
 import sys
+import signal
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -123,9 +124,35 @@ async def main():
 
         renew_task = asyncio.create_task(_renew_lock())
 
+        # Setup signal handlers for graceful shutdown
+        shutdown_event = asyncio.Event()
+        
+        def signal_handler(signum, frame):
+            logger.info(f"🛑 Received signal {signum}, initiating graceful shutdown...")
+            shutdown_event.set()
+        
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        
         try:
-            # Start polling
-            await dp.start_polling(bot)
+            # Start polling with shutdown handling
+            polling_task = asyncio.create_task(dp.start_polling(bot))
+            shutdown_task = asyncio.create_task(shutdown_event.wait())
+            
+            # Wait for either polling to complete or shutdown signal
+            done, pending = await asyncio.wait(
+                [polling_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Cancel remaining tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                    
         finally:
             if renew_task:
                 renew_task.cancel()
