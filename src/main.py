@@ -99,9 +99,34 @@ async def main():
         lock_key = f"bot:poller_lock:{settings.TELEGRAM_BOT_TOKEN[:8]}"
         lock_value = str(uuid.uuid4())
         got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+        
         if not got_lock:
-            logger.warning("🔒 Another instance holds poller lock. Exiting without polling.")
-            return
+            # Check if existing lock is expired or from a dead process
+            logger.warning("🔒 Another instance holds poller lock. Checking if it's alive...")
+            
+            # Wait a bit and try to steal the lock if it's not being renewed
+            await asyncio.sleep(10)
+            
+            # Try to get the current lock value and TTL
+            current_value = await redis.get(lock_key)
+            ttl = await redis.ttl(lock_key)
+            
+            if current_value and ttl > 0:
+                logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Exiting without polling.")
+                return
+            elif ttl <= 0:
+                logger.info("🧹 Found expired lock, attempting to claim it...")
+                # Try to delete the old lock and set a new one
+                await redis.delete(lock_key)
+                got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+                if got_lock:
+                    logger.info("✅ Successfully claimed expired lock!")
+                else:
+                    logger.warning("❌ Failed to claim expired lock. Another instance got it first.")
+                    return
+            else:
+                logger.warning("🔒 Lock exists but no TTL info. Exiting without polling.")
+                return
 
         # Background task to renew lock TTL
         renew_task = None
