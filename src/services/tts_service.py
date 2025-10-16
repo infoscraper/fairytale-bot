@@ -49,6 +49,19 @@ class TTSService:
                 temp_path = "/tmp/gsa.json"
                 try:
                     import json
+                    import base64
+                    
+                    # Try to decode as Base64 first (for Dokploy compatibility)
+                    try:
+                        if not creds_json.strip().startswith('{'):
+                            # Looks like Base64, try to decode
+                            decoded_json = base64.b64decode(creds_json).decode('utf-8')
+                            logger.info("🔓 Decoded Base64 credentials")
+                            creds_json = decoded_json
+                    except Exception:
+                        # Not Base64, continue with original
+                        pass
+                    
                     # Validate and format JSON
                     if isinstance(creds_json, str):
                         # Try to parse as JSON to validate
@@ -65,6 +78,7 @@ class TTSService:
                 except json.JSONDecodeError as json_err:
                     logger.error(f"❌ Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {json_err}")
                     logger.error(f"JSON content preview: {creds_json[:100]}...")
+                    logger.error(f"JSON content (raw): {repr(creds_json[:200])}")
                 except Exception as write_err:
                     logger.warning(f"⚠️ Could not write GOOGLE_APPLICATION_CREDENTIALS_JSON: {write_err}")
 
