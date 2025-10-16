@@ -32,6 +32,49 @@ logging.getLogger("elevenlabs").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+async def start_worker_mode():
+    """Start bot in worker mode (Celery tasks only, no polling)"""
+    logger.info("🔄 Starting Celery worker mode...")
+    
+    try:
+        # Import and start Celery worker
+        from .core.celery_app import celery_app
+        
+        # Start Celery worker in the background
+        import subprocess
+        import sys
+        
+        # Start Celery worker as subprocess
+        worker_process = subprocess.Popen([
+            sys.executable, "-m", "celery", 
+            "-A", "src.core.celery_app", 
+            "worker", 
+            "--loglevel=info",
+            "--concurrency=2"
+        ])
+        
+        logger.info(f"✅ Celery worker started with PID: {worker_process.pid}")
+        
+        # Keep the process alive
+        try:
+            worker_process.wait()
+        except KeyboardInterrupt:
+            logger.info("🛑 Stopping Celery worker...")
+            worker_process.terminate()
+            worker_process.wait()
+            
+    except Exception as e:
+        logger.error(f"❌ Error starting worker mode: {e}")
+        # Fallback: just keep the process alive without doing anything
+        logger.info("🔄 Fallback: keeping process alive for potential recovery...")
+        try:
+            while True:
+                await asyncio.sleep(60)
+                logger.info("💤 Worker mode: still alive...")
+        except KeyboardInterrupt:
+            logger.info("🛑 Worker mode stopped")
+
+
 async def init_database():
     """Initialize database with migrations"""
     logger.info("🔄 Initializing database...")
@@ -93,6 +136,8 @@ async def main():
         should_poll = settings.BOT_ROLE == "poller" and settings.ENVIRONMENT in {"production", "staging", "development"}
         if not should_poll:
             logger.warning(f"🤚 Polling disabled. ENVIRONMENT={settings.ENVIRONMENT}, BOT_ROLE={settings.BOT_ROLE}")
+            logger.info("🔄 Starting as worker mode (Celery tasks only)")
+            await start_worker_mode()
             return
 
         # Acquire distributed lock to ensure a single poller
@@ -113,6 +158,8 @@ async def main():
                     logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Exiting without polling.")
                     logger.warning("💡 This usually means multiple bot instances are running!")
                     logger.warning("🔧 Check Dokploy configuration: Replicas should be = 1")
+                    logger.info("🔄 Switching to worker mode...")
+                    await start_worker_mode()
                     return
                 else:
                     # Lock is expiring soon, might be from a dying process
@@ -126,7 +173,8 @@ async def main():
                     if got_lock:
                         logger.info("✅ Successfully claimed expiring lock!")
                     else:
-                        logger.warning("❌ Failed to claim expiring lock. Another instance got it first.")
+                        logger.warning("❌ Failed to claim expiring lock. Switching to worker mode.")
+                        await start_worker_mode()
                         return
             elif ttl <= 0:
                 logger.info("🧹 Found expired lock, attempting to claim it...")
@@ -136,7 +184,8 @@ async def main():
                 if got_lock:
                     logger.info("✅ Successfully claimed expired lock!")
                 else:
-                    logger.warning("❌ Failed to claim expired lock. Another instance got it first.")
+                    logger.warning("❌ Failed to claim expired lock. Switching to worker mode.")
+                    await start_worker_mode()
                     return
             else:
                 logger.warning("🔒 Lock exists but no TTL info. Attempting force claim...")
@@ -145,7 +194,8 @@ async def main():
                 await asyncio.sleep(2)
                 got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
                 if not got_lock:
-                    logger.warning("❌ Failed to force claim lock. Exiting.")
+                    logger.warning("❌ Failed to force claim lock. Switching to worker mode.")
+                    await start_worker_mode()
                     return
 
         # Background task to renew lock TTL
