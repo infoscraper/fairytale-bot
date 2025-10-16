@@ -104,32 +104,33 @@ async def main():
             # Check if existing lock is expired or from a dead process
             logger.warning("🔒 Another instance holds poller lock. Checking if it's alive...")
             
-            # Wait a bit and try to steal the lock if it's not being renewed
-            await asyncio.sleep(10)
-            
             # Try to get the current lock value and TTL
             current_value = await redis.get(lock_key)
             ttl = await redis.ttl(lock_key)
             
             if current_value and ttl > 0:
-                if ttl > 90:  # Lock was just renewed, respect it
+                if ttl > 60:  # Lock was recently renewed, respect it
                     logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Exiting without polling.")
+                    logger.warning("💡 This usually means multiple bot instances are running!")
+                    logger.warning("🔧 Check Dokploy configuration: Replicas should be = 1")
                     return
                 else:
                     # Lock is expiring soon, might be from a dying process
-                    logger.info(f"🕐 Lock expires soon (TTL: {ttl}s). Waiting for expiration...")
-                    await asyncio.sleep(ttl + 5)  # Wait for lock to expire
+                    logger.info(f"🕐 Lock expires soon (TTL: {ttl}s). Attempting to claim...")
                     
-                    # Try to claim the lock after expiration
+                    # More aggressive approach: try to claim immediately
+                    await redis.delete(lock_key)
+                    await asyncio.sleep(1)  # Brief pause
+                    
                     got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
                     if got_lock:
-                        logger.info("✅ Successfully claimed lock after expiration!")
+                        logger.info("✅ Successfully claimed expiring lock!")
                     else:
-                        logger.warning("❌ Failed to claim lock after expiration. Another instance got it first.")
+                        logger.warning("❌ Failed to claim expiring lock. Another instance got it first.")
                         return
             elif ttl <= 0:
                 logger.info("🧹 Found expired lock, attempting to claim it...")
-                # Try to delete the old lock and set a new one
+                # Force delete and claim
                 await redis.delete(lock_key)
                 got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
                 if got_lock:
@@ -138,8 +139,14 @@ async def main():
                     logger.warning("❌ Failed to claim expired lock. Another instance got it first.")
                     return
             else:
-                logger.warning("🔒 Lock exists but no TTL info. Exiting without polling.")
-                return
+                logger.warning("🔒 Lock exists but no TTL info. Attempting force claim...")
+                # Force delete and try to claim
+                await redis.delete(lock_key)
+                await asyncio.sleep(2)
+                got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+                if not got_lock:
+                    logger.warning("❌ Failed to force claim lock. Exiting.")
+                    return
 
         # Background task to renew lock TTL
         renew_task = None
