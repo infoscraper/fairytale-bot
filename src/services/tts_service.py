@@ -48,10 +48,23 @@ class TTSService:
             if not creds_path and creds_json:
                 temp_path = "/tmp/gsa.json"
                 try:
+                    import json
+                    # Validate and format JSON
+                    if isinstance(creds_json, str):
+                        # Try to parse as JSON to validate
+                        creds_data = json.loads(creds_json)
+                    else:
+                        creds_data = creds_json
+                    
+                    # Write formatted JSON
                     with open(temp_path, "w", encoding="utf-8") as f:
-                        f.write(creds_json)
+                        json.dump(creds_data, f, indent=2)
+                    
                     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
                     logger.info("🔐 Wrote Google credentials JSON to /tmp/gsa.json for Gemini TTS")
+                except json.JSONDecodeError as json_err:
+                    logger.error(f"❌ Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {json_err}")
+                    logger.error(f"JSON content preview: {creds_json[:100]}...")
                 except Exception as write_err:
                     logger.warning(f"⚠️ Could not write GOOGLE_APPLICATION_CREDENTIALS_JSON: {write_err}")
 
