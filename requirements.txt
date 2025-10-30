@@ -13,7 +13,8 @@ pydantic-settings>=2.5.0
 redis[hiredis]>=5.0.4,<6
 
 # Background Tasks
-celery[redis]==5.3.4
+# Use Celery without redis extra to avoid pinning redis<5; we install redis>=5 above
+celery==5.3.4
 
 # AI Services
 openai>=1.50.0
