@@ -9,8 +9,8 @@ pydantic>=2.9.0
 pydantic-settings>=2.5.0
 
 # Redis & Caching
-redis[hiredis]==4.6.0
-aioredis==2.0.1
+# aiogram 3.x FSM RedisStorage requires redis-py >=5 (provides async .aclose)
+redis[hiredis]>=5.0.4,<6
 
 # Background Tasks
 celery[redis]==5.3.4
