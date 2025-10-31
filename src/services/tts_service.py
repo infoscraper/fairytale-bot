@@ -289,14 +289,17 @@ class TTSService:
         return chunks
 
     async def _gemini_generate_long_audio(self, text: str, prompt: str, output_basename: str) -> Optional[BytesIO]:
+        logger.info(f"🎙️ _gemini_generate_long_audio: Starting, text length: {len(text)}")
         if not self.gemini_client:
-            logger.info("TTS disabled: Gemini client not initialized")
+            logger.warning("⚠️ TTS disabled: Gemini client not initialized")
             return None
 
         model = settings.GEMINI_TTS_MODEL
         voice_name = settings.GEMINI_TTS_VOICE
         language_code = settings.GEMINI_TTS_LANGUAGE
         max_bytes = settings.GEMINI_TTS_MAX_BYTES_PER_CHUNK
+
+        logger.info(f"🔧 Gemini TTS config: model={model}, voice={voice_name}, language={language_code}")
 
         voice = texttospeech.VoiceSelectionParams(
             name=voice_name,
@@ -307,70 +310,121 @@ class TTSService:
             audio_encoding=texttospeech.AudioEncoding.MP3
         )
 
+        logger.info(f"📝 Splitting text into chunks (max_bytes={max_bytes})...")
         chunks = self._split_text_into_byte_chunks(text, max_bytes=max_bytes)
+        logger.info(f"✅ Text split into {len(chunks)} chunks")
         if not chunks:
+            logger.warning("⚠️ No chunks after splitting")
             return None
 
+        # Use temporary directory for files
+        import tempfile
+        temp_dir = tempfile.mkdtemp(prefix="gemini_tts_")
+        logger.info(f"📁 Using temp directory: {temp_dir}")
+        
         part_paths: List[str] = []
-        for idx, chunk in enumerate(chunks, start=1):
-            synthesis_input = texttospeech.SynthesisInput(text=chunk, prompt=prompt)
-            response = self.gemini_client.synthesize_speech(
-                input=synthesis_input,
-                voice=voice,
-                audio_config=audio_config,
-            )
-            part_path = f"{output_basename}_part{idx:02d}.mp3"
-            with open(part_path, "wb") as f:
-                f.write(response.audio_content)
-            part_paths.append(part_path)
+        try:
+            for idx, chunk in enumerate(chunks, start=1):
+                logger.info(f"🎤 Generating audio for chunk {idx}/{len(chunks)} (length: {len(chunk)} chars)...")
+                synthesis_input = texttospeech.SynthesisInput(text=chunk, prompt=prompt)
+                
+                # Run synchronous API call in thread pool to avoid blocking event loop
+                def _synthesize_sync():
+                    return self.gemini_client.synthesize_speech(
+                        input=synthesis_input,
+                        voice=voice,
+                        audio_config=audio_config,
+                    )
+                
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, _synthesize_sync)
+                
+                logger.info(f"✅ Chunk {idx} synthesized successfully, audio size: {len(response.audio_content)} bytes")
+                part_path = os.path.join(temp_dir, f"{output_basename}_part{idx:02d}.mp3")
+                with open(part_path, "wb") as f:
+                    f.write(response.audio_content)
+                part_paths.append(part_path)
+                logger.info(f"💾 Saved chunk {idx} to {part_path}")
 
-        # Merge if multiple parts
-        if len(part_paths) == 1:
+
+            logger.info(f"✅ All {len(part_paths)} chunks generated successfully")
+
+            # Merge if multiple parts
+            if len(part_paths) == 1:
+                logger.info("📦 Single chunk, no merge needed")
+                with open(part_paths[0], "rb") as f:
+                    data = f.read()
+                buf = BytesIO(data)
+                buf.seek(0)
+                logger.info(f"✅ Returning audio buffer: {len(data)} bytes")
+                return buf
+
+            logger.info(f"🔗 Merging {len(part_paths)} chunks with ffmpeg...")
+            if shutil.which("ffmpeg"):
+                manifest = os.path.join(temp_dir, "parts.txt")
+                with open(manifest, "w", encoding="utf-8") as mf:
+                    for p in part_paths:
+                        mf.write(f"file '{p}'\n")
+                out_path = os.path.join(temp_dir, f"{output_basename}.mp3")
+                try:
+                    # Run ffmpeg in executor to avoid blocking
+                    def _run_ffmpeg():
+                        return subprocess.run(
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-f",
+                                "concat",
+                                "-safe",
+                                "0",
+                                "-i",
+                                manifest,
+                                "-c",
+                                "copy",
+                                out_path,
+                            ],
+                            check=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, _run_ffmpeg)
+                    logger.info(f"✅ Audio merged successfully: {out_path}")
+                    with open(out_path, "rb") as f:
+                        data = f.read()
+                    buf = BytesIO(data)
+                    buf.seek(0)
+                    logger.info(f"✅ Returning merged audio buffer: {len(data)} bytes")
+                    return buf
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"❌ ffmpeg merge failed: {e}")
+                except Exception as e:
+                    logger.error(f"❌ Error during merge: {e}", exc_info=True)
+            else:
+                logger.warning("⚠️ ffmpeg not available, cannot merge chunks")
+
+            # Fallback: return first part only if no merge available
+            logger.warning("⚠️ Returning first chunk only as fallback")
             with open(part_paths[0], "rb") as f:
                 data = f.read()
             buf = BytesIO(data)
             buf.seek(0)
+            logger.info(f"✅ Returning first chunk buffer: {len(data)} bytes")
             return buf
-
-        if shutil.which("ffmpeg"):
-            manifest = "parts.txt"
-            with open(manifest, "w", encoding="utf-8") as mf:
-                for p in part_paths:
-                    mf.write(f"file '{p}'\n")
-            out_path = f"{output_basename}.mp3"
+            
+        except Exception as e:
+            logger.error(f"❌ Error in _gemini_generate_long_audio: {e}", exc_info=True)
+            return None
+        finally:
+            # Clean up temporary files
             try:
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-f",
-                        "concat",
-                        "-safe",
-                        "0",
-                        "-i",
-                        manifest,
-                        "-c",
-                        "copy",
-                        out_path,
-                    ],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                with open(out_path, "rb") as f:
-                    data = f.read()
-                buf = BytesIO(data)
-                buf.seek(0)
-                return buf
-            except subprocess.CalledProcessError as e:
-                logger.error(f"❌ ffmpeg merge failed: {e}")
-
-        # Fallback: return first part only if no merge available
-        with open(part_paths[0], "rb") as f:
-            data = f.read()
-        buf = BytesIO(data)
-        buf.seek(0)
-        return buf
+                import shutil as shutil_module
+                if os.path.exists(temp_dir):
+                    shutil_module.rmtree(temp_dir)
+                    logger.info(f"🧹 Cleaned up temp directory: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error cleaning up temp directory: {e}")
 
     def _get_child_appropriate_voice(self, child_age: int) -> str:
         """
