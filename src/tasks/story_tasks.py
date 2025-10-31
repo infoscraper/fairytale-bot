@@ -10,6 +10,7 @@ from ..core.database import async_session_maker
 from ..models.story import Story
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
+from aiogram.exceptions import TelegramBadRequest
 from ..core.config import settings
 import logging
 
@@ -181,12 +182,31 @@ async def _generate_audio_internal(story_id: int, chat_id: int):
                 
                 # Отправляем аудио
                 logger.info(f"📤 Sending voice message to chat_id={chat_id}...")
-                await bot.send_voice(
-                    chat_id=chat_id,
-                    voice=audio_input,
-                    caption=f"🎧 Аудиосказка: {story.theme.title()}"
-                )
-                logger.info(f"✅ Voice message sent successfully!")
+                try:
+                    await bot.send_voice(
+                        chat_id=chat_id,
+                        voice=audio_input,
+                        caption=f"🎧 Аудиосказка: {story.theme.title()}"
+                    )
+                    logger.info(f"✅ Voice message sent successfully!")
+                except TelegramBadRequest as e:
+                    if "VOICE_MESSAGES_FORBIDDEN" in str(e):
+                        logger.warning(f"⚠️ Voice messages forbidden in this chat, trying to send as audio file...")
+                        # Fallback: send as audio file instead of voice message
+                        audio_input_retry = BufferedInputFile(
+                            file=audio_data,
+                            filename=f"story_{story_id}.mp3"
+                        )
+                        await bot.send_audio(
+                            chat_id=chat_id,
+                            audio=audio_input_retry,
+                            title=f"Аудиосказка: {story.theme.title()}",
+                            performer="Сказочный бот",
+                            caption=f"🎧 Аудиосказка: {story.theme.title()}"
+                        )
+                        logger.info(f"✅ Audio file sent successfully as fallback!")
+                    else:
+                        raise
             else:
                 logger.warning(f"⚠️ Audio buffer is None, sending error message to user")
                 await bot.send_message(
