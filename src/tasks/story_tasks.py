@@ -9,10 +9,36 @@ from ..services.tts_service import TTSService
 from ..core.database import async_session_maker
 from ..models.story import Story
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from ..core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+def _run_async(coro):
+    """
+    Safely run async coroutine in Celery worker context.
+    Handles event loop creation/cleanup properly for prefork workers.
+    """
+    try:
+        # Try to get existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Loop is closed")
+    except RuntimeError:
+        # No event loop exists, create new one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        # Clean up if we created the loop
+        if not loop.is_running():
+            pending = asyncio.all_tasks(loop)
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
 
 @celery_app.task(bind=True, max_retries=3)
 def generate_story_async(self, child_id: int, theme: str, message_id: int, chat_id: int):
@@ -20,8 +46,8 @@ def generate_story_async(self, child_id: int, theme: str, message_id: int, chat_
     Асинхронная генерация сказки
     """
     try:
-        # Запускаем асинхронную функцию в новом event loop
-        return asyncio.run(_generate_story_internal(child_id, theme, message_id, chat_id))
+        # Запускаем асинхронную функцию безопасно для Celery
+        return _run_async(_generate_story_internal(child_id, theme, message_id, chat_id))
     except Exception as exc:
         logger.error(f"Story generation failed: {exc}")
         # Retry with exponential backoff
@@ -83,7 +109,7 @@ def generate_audio_async(self, story_id: int, chat_id: int):
     Асинхронная генерация аудио
     """
     try:
-        return asyncio.run(_generate_audio_internal(story_id, chat_id))
+        return _run_async(_generate_audio_internal(story_id, chat_id))
     except Exception as exc:
         logger.error(f"Audio generation failed: {exc}")
         # Don't retry audio generation too aggressively
@@ -126,24 +152,22 @@ async def _generate_audio_internal(story_id: int, chat_id: int):
             )
             
             if audio_buffer:
-                # Сохраняем во временный файл для отправки
-                import os
-                import tempfile
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-                temp_file.write(audio_buffer.read())
-                temp_file.close()
+                # Читаем данные из BytesIO
+                audio_data = audio_buffer.read()
+                audio_buffer.seek(0)  # Reset for potential retry
                 
-                try:
-                    # Отправляем аудио
-                    with open(temp_file.name, 'rb') as audio_file:
-                        await bot.send_voice(
-                            chat_id=chat_id,
-                            voice=audio_file,
-                            caption=f"🎧 Аудиосказка: {story.theme.title()}"
-                        )
-                finally:
-                    # Удаляем временный файл
-                    os.unlink(temp_file.name)
+                # Создаём InputFile для aiogram
+                audio_input = BufferedInputFile(
+                    file=audio_data,
+                    filename=f"story_{story_id}.mp3"
+                )
+                
+                # Отправляем аудио
+                await bot.send_voice(
+                    chat_id=chat_id,
+                    voice=audio_input,
+                    caption=f"🎧 Аудиосказка: {story.theme.title()}"
+                )
             else:
                 await bot.send_message(
                     chat_id=chat_id,
