@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     GEMINI_TTS_MODEL: str = "gemini-2.5-flash-tts"
     GEMINI_TTS_VOICE: str = "Algieba"
     GEMINI_TTS_LANGUAGE: str = "ru-ru"
-    GEMINI_TTS_MAX_BYTES_PER_CHUNK: int = 800
+    GEMINI_TTS_MAX_BYTES_PER_CHUNK: int = 4500  # Increased from 800 to reduce number of chunks (~3-4 chunks instead of 7-8)
     
     # Environment
     ENVIRONMENT: str = "development"

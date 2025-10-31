@@ -103,7 +103,7 @@ async def _generate_story_internal(child_id: int, theme: str, message_id: int, c
     finally:
         await bot.session.close()
 
-@celery_app.task(bind=True, max_retries=2)
+@celery_app.task(bind=True, max_retries=2, time_limit=600, soft_time_limit=540)
 def generate_audio_async(self, story_id: int, chat_id: int):
     """
     Асинхронная генерация аудио
