@@ -15,19 +15,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True, max_retries=3)
-def generate_story_async(self, child_id: int, theme: str, user_id: int, message_id: int, chat_id: int):
+def generate_story_async(self, child_id: int, theme: str, message_id: int, chat_id: int):
     """
     Асинхронная генерация сказки
     """
     try:
         # Запускаем асинхронную функцию в новом event loop
-        return asyncio.run(_generate_story_internal(child_id, theme, user_id, message_id, chat_id))
+        return asyncio.run(_generate_story_internal(child_id, theme, message_id, chat_id))
     except Exception as exc:
         logger.error(f"Story generation failed: {exc}")
         # Retry with exponential backoff
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
 
-async def _generate_story_internal(child_id: int, theme: str, user_id: int, message_id: int, chat_id: int):
+async def _generate_story_internal(child_id: int, theme: str, message_id: int, chat_id: int):
     """
     Внутренняя функция генерации сказки
     """
@@ -46,8 +46,7 @@ async def _generate_story_internal(child_id: int, theme: str, user_id: int, mess
             story_service = StoryService(session)
             story = await story_service.create_story(
                 child_id=child_id,
-                theme=theme,
-                user_id=user_id
+                theme=theme
             )
             
             if not story:

@@ -131,7 +131,6 @@ async def handle_theme_selection(
             task_result = generate_story_async.delay(
                 child_id=child_id,
                 theme=theme if theme != "random" else None,
-                user_id=current_user.id,
                 message_id=progress_message.message_id,
                 chat_id=callback.message.chat.id
             )
