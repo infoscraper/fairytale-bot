@@ -99,26 +99,51 @@ async def _generate_audio_internal(story_id: int, chat_id: int):
     try:
         # Получаем сказку
         async with async_session_maker() as session:
-            story = await session.get(Story, story_id)
+            from sqlalchemy import select
+            from ..models.child import Child
+            
+            result = await session.execute(
+                select(Story).where(Story.id == story_id)
+            )
+            story = result.scalar_one_or_none()
             if not story:
                 return
             
+            # Получаем настройки ребёнка для voice_id
+            child_result = await session.execute(
+                select(Child).where(Child.id == story.child_id)
+            )
+            child = child_result.scalar_one_or_none()
+            voice_id = child.preferred_voice_id if child else None
+            
             # Генерируем аудио
             tts_service = TTSService()
-            audio_result = await tts_service.generate_audio_for_story(story)
+            audio_buffer = await tts_service.generate_audio_for_story(
+                story_text=story.story_text,
+                child_name=story.child_name,
+                child_age=story.child_age,
+                voice_id=voice_id
+            )
             
-            if audio_result and audio_result.get('success'):
-                # Отправляем аудио
-                with open(audio_result['file_path'], 'rb') as audio_file:
-                    await bot.send_voice(
-                        chat_id=chat_id,
-                        voice=audio_file,
-                        caption=f"🎧 Аудиосказка: {story.theme.title()}"
-                    )
-                
-                # Удаляем временный файл
+            if audio_buffer:
+                # Сохраняем во временный файл для отправки
                 import os
-                os.unlink(audio_result['file_path'])
+                import tempfile
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                temp_file.write(audio_buffer.read())
+                temp_file.close()
+                
+                try:
+                    # Отправляем аудио
+                    with open(temp_file.name, 'rb') as audio_file:
+                        await bot.send_voice(
+                            chat_id=chat_id,
+                            voice=audio_file,
+                            caption=f"🎧 Аудиосказка: {story.theme.title()}"
+                        )
+                finally:
+                    # Удаляем временный файл
+                    os.unlink(temp_file.name)
             else:
                 await bot.send_message(
                     chat_id=chat_id,
