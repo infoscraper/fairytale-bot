@@ -108,10 +108,13 @@ def generate_audio_async(self, story_id: int, chat_id: int):
     """
     Асинхронная генерация аудио
     """
+    logger.info(f"🎵 Starting audio generation task for story_id={story_id}, chat_id={chat_id}")
     try:
-        return _run_async(_generate_audio_internal(story_id, chat_id))
+        result = _run_async(_generate_audio_internal(story_id, chat_id))
+        logger.info(f"✅ Audio generation task completed for story_id={story_id}")
+        return result
     except Exception as exc:
-        logger.error(f"Audio generation failed: {exc}")
+        logger.error(f"❌ Audio generation failed for story_id={story_id}: {exc}", exc_info=True)
         # Don't retry audio generation too aggressively
         if self.request.retries < 1:
             raise self.retry(exc=exc, countdown=30)
@@ -120,10 +123,12 @@ async def _generate_audio_internal(story_id: int, chat_id: int):
     """
     Внутренняя функция генерации аудио
     """
+    logger.info(f"🎵 _generate_audio_internal: Starting for story_id={story_id}, chat_id={chat_id}")
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
     
     try:
         # Получаем сказку
+        logger.info(f"📖 Fetching story with id={story_id}")
         async with async_session_maker() as session:
             from sqlalchemy import select
             from ..models.child import Child
@@ -133,16 +138,22 @@ async def _generate_audio_internal(story_id: int, chat_id: int):
             )
             story = result.scalar_one_or_none()
             if not story:
+                logger.warning(f"⚠️ Story not found: story_id={story_id}")
                 return
             
+            logger.info(f"✅ Story found: theme={story.theme}, child_id={story.child_id}")
+            
             # Получаем настройки ребёнка для voice_id
+            logger.info(f"👶 Fetching child settings for child_id={story.child_id}")
             child_result = await session.execute(
                 select(Child).where(Child.id == story.child_id)
             )
             child = child_result.scalar_one_or_none()
             voice_id = child.preferred_voice_id if child else None
+            logger.info(f"🎤 Using voice_id={voice_id}")
             
             # Генерируем аудио
+            logger.info(f"🎙️ Starting TTS generation...")
             tts_service = TTSService()
             audio_buffer = await tts_service.generate_audio_for_story(
                 story_text=story.story_text,
@@ -151,30 +162,42 @@ async def _generate_audio_internal(story_id: int, chat_id: int):
                 voice_id=voice_id
             )
             
+            logger.info(f"🔊 TTS generation completed. Audio buffer: {audio_buffer is not None}")
+            
             if audio_buffer:
                 # Читаем данные из BytesIO
+                logger.info(f"📦 Reading audio buffer data...")
                 audio_data = audio_buffer.read()
+                audio_size = len(audio_data)
+                logger.info(f"✅ Audio data read: {audio_size} bytes")
                 audio_buffer.seek(0)  # Reset for potential retry
                 
                 # Создаём InputFile для aiogram
+                logger.info(f"📎 Creating BufferedInputFile...")
                 audio_input = BufferedInputFile(
                     file=audio_data,
                     filename=f"story_{story_id}.mp3"
                 )
                 
                 # Отправляем аудио
+                logger.info(f"📤 Sending voice message to chat_id={chat_id}...")
                 await bot.send_voice(
                     chat_id=chat_id,
                     voice=audio_input,
                     caption=f"🎧 Аудиосказка: {story.theme.title()}"
                 )
+                logger.info(f"✅ Voice message sent successfully!")
             else:
+                logger.warning(f"⚠️ Audio buffer is None, sending error message to user")
                 await bot.send_message(
                     chat_id=chat_id,
                     text="🔇 Не удалось создать аудиоверсию сказки, но текст доступен выше."
                 )
                 
     except Exception as e:
-        logger.error(f"Error in audio generation: {e}")
+        logger.error(f"❌ Error in audio generation: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
     finally:
+        logger.info(f"🧹 Closing bot session...")
         await bot.session.close()
