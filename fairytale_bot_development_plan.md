@@ -3,12 +3,12 @@
 ## 🎯 Общая стратегия
 
 **Цель:** Создать MVP сказочного бота с полной инфраструктурой для дальнейшего масштабирования  
-**Окружение:** Локальная разработка с Docker Desktop + Railway для продакшена  
+**Окружение (обновлено):** Локальная разработка с Docker Desktop + Dokploy на собственном сервере для staging/production  
 **Исключения:** Платежи и подписки (интеграция позже)
 
 ---
 
-## 📋 ЭТАП 0: Подготовка инфраструктуры
+## 📋 ЭТАП 0: Подготовка инфраструктуры (обновлено под Dokploy)
 
 ### 0.1 Настройка базового окружения
 
@@ -28,11 +28,9 @@ fairytale_bot/
 ├── Dockerfile
 ├── requirements.txt
 ├── alembic.ini
-├── Procfile                    # Railway deployment
-├── railway.json               # Railway configuration
-├── railway.toml               # Railway environment config
-├── nixpacks.toml              # Railway build optimization
-├── RAILWAY_DEPLOYMENT.md      # Railway deployment guide
+├── Procfile                    # Авто‑инициализация Google creds (для Railway/Dokploy)
+├── nixpacks.toml              # (опционально/legacy, если используете Nixpacks)
+├── RAILWAY_DEPLOYMENT.md      # Legacy: Railway deployment guide
 ├── src/
 │   ├── __init__.py
 │   ├── main.py
@@ -46,20 +44,19 @@ fairytale_bot/
 
 #### 0.1.2 Базовые конфигурационные файлы
 
-**Создаем `.env.example`:**
+**Создаем `.env.example` (актуально для Dokploy):**
 ```env
-# Database (Railway автоматически создаст PostgreSQL)
-DATABASE_URL=postgresql+asyncpg://postgres:password@containers-us-west-xxx.railway.app:5432/railway
+# Database
 # Для локальной разработки:
 # DATABASE_URL=postgresql+asyncpg://fairytale_user:fairytale_pass@localhost:5432/fairytale_db
-# POSTGRES_USER=fairytale_user
-# POSTGRES_PASSWORD=fairytale_pass
-# POSTGRES_DB=fairytale_db
+# Для Dokploy (пример):
+# DATABASE_URL=postgresql://fairytalebot:YOUR_PG_PASS@PG_INTERNAL_HOST:5432/fairytalebot_staging
 
-# Redis (Railway автоматически создаст Redis)
-REDIS_URL=redis://default:password@containers-us-west-xxx.railway.app:6379
+# Redis
 # Для локальной разработки:
 # REDIS_URL=redis://localhost:6380/0
+# Для Dokploy (пример):
+# REDIS_URL=redis://default:YOUR_REDIS_PASS@REDIS_INTERNAL_HOST:6379/0
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=your_bot_token_here
@@ -77,12 +74,14 @@ ELEVENLABS_SIMILARITY_BOOST=0.85
 ELEVENLABS_STYLE=0.2
 ELEVENLABS_USE_SPEAKER_BOOST=True
 
-# Google Text-to-Speech (альтернатива ElevenLabs)
-GOOGLE_APPLICATION_CREDENTIALS=path/to/your/service-account-key.json
-GOOGLE_CLOUD_PROJECT_ID=your-gcp-project-id
-GOOGLE_TTS_VOICE_NAME=ru-RU-Standard-A
-GOOGLE_TTS_VOICE_GENDER=FEMALE
-GOOGLE_TTS_AUDIO_ENCODING=MP3
+# Gemini TTS (Google Cloud Text-to-Speech)
+# В Dokploy используем GOOGLE_APPLICATION_CREDENTIALS_JSON (весь JSON одной строкой)
+GOOGLE_APPLICATION_CREDENTIALS_JSON={...}
+TTS_PROVIDER=gemini
+GEMINI_TTS_MODEL=gemini-2.5-flash-tts
+GEMINI_TTS_VOICE=Algieba
+GEMINI_TTS_LANGUAGE=ru-ru
+GEMINI_TTS_MAX_BYTES_PER_CHUNK=800
 
 # Environment
 ENVIRONMENT=development
@@ -219,7 +218,7 @@ isort==5.13.2
 
 #### 0.2.2 Базовый Python контейнер
 
-**Создаем `Dockerfile`:**
+**Создаем `Dockerfile` (совместимо с Dokploy):**
 ```dockerfile
 FROM python:3.11-slim
 
@@ -237,6 +236,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем код
 COPY src/ ./src/
 COPY alembic.ini .
+COPY alembic/ ./alembic/
 COPY alembic/ ./alembic/
 
 # Создаем пользователя
@@ -526,14 +526,14 @@ print(f'Result: {result.get(timeout=10)}')
 
 ---
 
-## 📋 ЭТАП 0.5: Railway Deployment Setup
+## 📋 ЭТАП 0.5: Dokploy Deployment Setup (обновлено)
 
-### 0.5.1 Railway Configuration Files
+### 0.5.1 Конфигурация запуска
 
-**Создаем `Procfile`:**
+**Procfile (автозапись Google creds при старте):**
 ```
-web: python -m src.main
-worker: celery -A src.core.celery_app worker --loglevel=info
+web: bash -lc 'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gsa.json 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gsa.json}; python -m src.main'
+worker: bash -lc 'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gsa.json 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gsa.json}; celery -A src.core.celery_app worker --loglevel=info'
 ```
 
 **Создаем `railway.json`:**
@@ -583,52 +583,43 @@ cmds = [
 cmd = "python -m src.main"
 ```
 
-### 0.5.2 Railway Environment Variables
+### 0.5.2 Переменные окружения для Dokploy
 
-**Обязательные переменные для Railway:**
 ```env
-# Database (Railway автоматически создаст)
-DATABASE_URL=postgresql+asyncpg://postgres:password@containers-us-west-xxx.railway.app:5432/railway
+ENVIRONMENT=staging
+BOT_ROLE=poller
 
-# Redis (Railway автоматически создаст)
-REDIS_URL=redis://default:password@containers-us-west-xxx.railway.app:6379
+# Postgres (пример)
+DATABASE_URL=postgresql://fairytalebot:YOUR_PG_PASS@PG_INTERNAL_HOST:5432/fairytalebot_staging
+
+# Redis (пример)
+REDIS_URL=redis://default:YOUR_REDIS_PASS@REDIS_INTERNAL_HOST:6379/0
 
 # Telegram Bot
-TELEGRAM_BOT_TOKEN=your_production_bot_token
+TELEGRAM_BOT_TOKEN=your_staging_bot_token
 
 # OpenAI
 OPENAI_API_KEY=your_openai_key
+OPENAI_MODEL=gpt-4o-mini
 
-# ElevenLabs
-ELEVENLABS_API_KEY=your_elevenlabs_key
-
-# Environment
-ENVIRONMENT=production
-DEBUG=False
+# Gemini TTS
+TTS_PROVIDER=gemini
+GOOGLE_APPLICATION_CREDENTIALS_JSON={...}
+GEMINI_TTS_MODEL=gemini-2.5-flash-tts
+GEMINI_TTS_VOICE=Algieba
+GEMINI_TTS_LANGUAGE=ru-ru
+GEMINI_TTS_MAX_BYTES_PER_CHUNK=800
 ```
 
-### 0.5.3 Railway Deployment Process
+### 0.5.3 Процесс деплоя в Dokploy
 
-**Шаги деплоя:**
-1. Создать проект в Railway Dashboard
-2. Добавить PostgreSQL и Redis сервисы
-3. Настроить переменные окружения
-4. Подключить GitHub репозиторий
-5. Настроить автоматический деплой
+Шаги:
+1. Подключить GitHub, выбрать репозиторий `fairytale-bot`, ветку `feature/gemini-tts-integration`
+2. Build Type: Dockerfile; Docker File: `Dockerfile`; Docker Context Path: `/`
+3. Заполнить переменные окружения (см. 0.5.2)
+4. Нажать Save → Clean Cache → Deploy
 
-**Команды для деплоя:**
-```bash
-# Подготовка к деплою
-git add .
-git commit -m "Prepare for Railway deployment"
-git push origin main
-
-# Проверка деплоя
-railway logs
-railway status
-```
-
-### 0.5.4 Railway Lessons Learned
+### 0.5.4 Уроки деплоя (Dokploy/Railway)
 
 **Критические ошибки и их решения:**
 
@@ -641,12 +632,12 @@ railway status
    - Решение: Остановить все локальные экземпляры, проверить webhook в BotFather
 
 3. **Database Connection Issues**:
-   - Проблема: Неправильный DATABASE_URL формат
-   - Решение: Использовать postgresql+asyncpg:// вместо postgresql://
+   - Проблема: Неверные креды/хост для staging
+   - Решение: Использовать Internal Host из Dokploy; строка `postgresql://user:pass@host:5432/db` (драйвер asyncpg подменяется в коде)
 
-4. **Redis Compatibility Issues**:
-   - Проблема: Redis 5.x vs 4.x API различия
-   - Решение: Использовать redis[hiredis]==4.6.0 для совместимости
+4. **Redis Credentials**:
+   - Проблема: invalid username-password pair
+   - Решение: REDIS_URL вида `redis://default:pass@host:6379/0` (пароль из Dokploy)
 
 5. **Alembic Migration Issues**:
    - Проблема: Миграции не применяются на Railway
@@ -1037,30 +1028,54 @@ asyncio.run(test())
 
 ## 📋 СЛЕДУЮЩИЕ ШАГИ РАЗРАБОТКИ
 
-### ЭТАП 2А: Staging Environment Setup (1 день) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
+### ЭТАП 2А: Критические исправления и улучшения (3-4 дня) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
 
-#### 2А.1 Создание Staging окружения
+#### 2А.1 Создание Staging окружения (День 1)
 ```bash
 # Задачи:
 - [ ] Создать staging бота в BotFather
 - [ ] Создать отдельный Railway проект для staging
-- [ ] Настроить staging переменные окружения
+- [ ] Настроить staging переменные окружения (отдельная БД)
 - [ ] Создать staging branch в Git
-- [ ] Настроить автоматический деплой staging
+- [ ] Настроить автоматический деплой staging → production
+- [ ] Создать deployment скрипты
+- [ ] Добавить staging логирование
 ```
 
-#### 2А.2 Staging Workflow
+#### 2А.2 Починка функционала ограничений (День 1-2)
 ```bash
-# Задачи:
-- [ ] Создать deployment скрипты
-- [ ] Настроить staging → production pipeline
-- [ ] Добавить staging логирование
-- [ ] Создать staging тесты
+# КРИТИЧЕСКАЯ ПРОБЛЕМА: can_create_free_story() не вызывается!
+- [ ] Добавить проверку лимитов перед созданием сказки
+- [ ] Реализовать тестовый режим (список telegram_id в конфиге)
+- [ ] Создать UI для превышения лимита (3 сказки)
+- [ ] Добавить предложение об оплате с заглушкой
+- [ ] Протестировать ограничения на staging
+```
+
+#### 2А.3 Интеграция Gemini-TTS (День 2-3)
+```bash
+# Замена ElevenLabs на Gemini-TTS
+- [ ] Создать GeminiTTSService (30 голосов, 80+ языков)
+- [ ] Протестировать голоса для детей разных возрастов
+- [ ] Настроить промпты для детской озвучки (2-8 лет)
+- [ ] Интегрировать в story_creation.py
+- [ ] Обновить requirements.txt (google-cloud-texttospeech>=2.31.0)
+- [ ] Протестировать качество аудио на staging
+```
+
+#### 2А.4 Система платежей (День 2)
+```bash
+# Заглушка для будущей интеграции
+- [ ] Создать payment keyboards и handlers
+- [ ] Добавить предложение подписки (299₽/месяц)
+- [ ] Реализовать заглушку платежей
+- [ ] Добавить информацию о преимуществах подписки
+- [ ] Протестировать flow превышения лимитов
 ```
 
 ### ЭТАП 2Б: Улучшение UX и стабильности (1-2 дня) ✅ ЗАВЕРШЕН
 
-#### 2Б.1 Починка архитектуры БД
+#### 2Б.1 Починка архитектуры БД ✅ ЗАВЕРШЕНО
 ```bash
 # Задачи:
 - [x] Восстановить Foreign Keys правильно
@@ -1069,7 +1084,7 @@ asyncio.run(test())
 - [x] Протестировать все связи между таблицами
 ```
 
-#### 2Б.2 Расширение функций профилей
+#### 2Б.2 Расширение функций профилей ✅ ЗАВЕРШЕНО
 ```bash
 # Задачи:
 - [x] Редактирование профилей детей
@@ -1078,7 +1093,7 @@ asyncio.run(test())
 - [x] Валидация возраста (1-16 лет)
 ```
 
-#### 2Б.3 Улучшение генерации сказок
+#### 2Б.3 Улучшение генерации сказок ✅ ЗАВЕРШЕНО
 ```bash
 # Задачи:
 - [x] Добавить больше тем сказок
@@ -1121,32 +1136,32 @@ asyncio.run(test())
 - [ ] Эволюция предпочтений
 ```
 
-### ЭТАП 2Г: Аудио-производство (3-4 дня) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
+### ЭТАП 2Г: Аудио-производство (ОБНОВЛЕНО) 🚀 ВЫСОКИЙ ПРИОРИТЕТ
 
-#### 2Г.1 Text-to-Speech (ЧАСТИЧНО ГОТОВО)
+#### 2Г.1 Gemini-TTS интеграция (ПРИОРИТЕТ)
 ```bash
 # Задачи:
-- [x] Интеграция с ElevenLabs TTS (базовая)
-- [x] Голос Charlotte настроен
-- [ ] Выбор голоса пользователем (мужской/женский)
-- [ ] Настройка скорости чтения
+- [x] Интеграция с ElevenLabs TTS (базовая) - ЗАМЕНИТЬ НА GEMINI
+- [ ] Создать GeminiTTSService с 30 голосами
+- [ ] Протестировать голоса: Aoede, Charon, Kore, Fenrir для детей
+- [ ] Настроить русскоязычные промпты для озвучки (2-8 лет)
+- [ ] Интеграция в story_creation.py
+- [ ] Обработка ошибок Gemini TTS API
 - [ ] Сохранение аудио файлов в БД
-- [ ] Обработка ошибок TTS API
-- [ ] Оптимизация размера аудио файлов
 ```
 
-#### 2Г.2 Фоновая музыка
+#### 2Г.2 Фоновая музыка (ОТЛОЖЕНО)
 ```bash
-# Задачи:
-- [ ] Интеграция с Suno AI / ElevenLabs
-- [ ] Генерация фоновой музыки
-- [ ] Микширование речи и музыки
-- [ ] Разные стили музыки по жанрам
+# Задачи - ОТЛОЖЕНЫ НА БУДУЩЕЕ:
+- [ ] Интеграция с royalty-free музыкой
+- [ ] pydub для микширования аудио
+- [ ] Разные стили музыки по жанрам сказок
+- [ ] Настройка громкости фоновой музыки
 ```
 
-#### 2Г.3 Полное аудио
+#### 2Г.3 Полное аудио (ОТЛОЖЕНО)
 ```bash
-# Задачи:
+# Задачи - ОТЛОЖЕНЫ НА БУДУЩЕЕ:
 - [ ] Создание полного аудио (речь + музыка)
 - [ ] Опции воспроизведения в Telegram
 - [ ] Сохранение как голосовое сообщение
@@ -1268,101 +1283,109 @@ asyncio.run(test())
 
 ## 🎯 РЕКОМЕНДУЕМЫЙ ПЛАН НА БЛИЖАЙШИЕ 3 НЕДЕЛИ:
 
-### Неделя 1: Staging + TTS (ПРИОРИТЕТ)
-1. **День 1**: Этап 2А (staging окружение)
-   - Создание staging бота
-   - Настройка Railway staging
-   - Staging workflow
-2. **День 2-4**: Этап 2Г.1 (улучшение TTS)
-   - Исправление ошибок ElevenLabs
-   - Выбор голоса пользователем
-   - Сохранение аудио в БД
-3. **День 5-7**: Этап 2Г.2 (фоновая музыка)
-   - Интеграция с Suno AI
-   - Генерация фоновой музыки
+### Неделя 1: Критические исправления (ПРИОРИТЕТ)
+1. **День 1**: Этап 2А.1-2А.2 (Staging + Ограничения)
+   - Создание staging бота и Railway проекта
+   - Исправление критической ошибки с лимитами
+   - Добавление тестового режима
+   - Создание UI для превышения лимитов
+2. **День 2-3**: Этап 2А.3-2А.4 (Gemini TTS + Платежи)
+   - Создание GeminiTTSService
+   - Тестирование голосов для детей
+   - Интеграция в story_creation.py
+   - Создание заглушки платежей
+3. **День 4-5**: Тестирование и деплой
+   - Тестирование на staging
+   - Деплой в production
+   - Мониторинг работы
 
 ### Неделя 2: Серии и расширения  
-1. **День 8-10**: Этап 2В.2 (система серий)
+1. **День 6-8**: Этап 2В.2 (система серий)
    - Восстановление модели StorySeries
    - Создание многосерийных сказок
-2. **День 11-12**: Этап 2В.3 (память и контекст)
+   - Активация отключенных handlers
+2. **День 9-10**: Этап 2В.3 (память и контекст)
    - Запоминание предпочтений
    - Адаптация под предыдущие сказки
-3. **День 13-14**: Этап 2Г.3 (полное аудио)
-   - Микширование речи и музыки
-   - Оптимизация файлов
+3. **День 11-12**: Дополнительные улучшения
+   - Оптимизация производительности
+   - Улучшение UX
 
 ### Неделя 3: Мониторинг и аналитика 🚀 НОВОЕ
-1. **День 15-17**: Этап 3.1-3.2 (Event Tracking + User Analytics)
+1. **День 13-15**: Этап 3.1-3.2 (Event Tracking + User Analytics)
    - Создание AnalyticsService
    - Трекинг ключевых событий
    - Анализ воронки конверсии
    - Retention анализ
-2. **День 18-19**: Этап 3.3-3.4 (Content + Business Analytics)
+2. **День 16-17**: Этап 3.3-3.4 (Content + Business Analytics)
    - Анализ контента и предпочтений
    - Бизнес-метрики и воронка подписок
    - Cohort analysis
-3. **День 20-21**: Этап 3.5 (Real-time Dashboard)
+3. **День 18-21**: Этап 3.5 (Real-time Dashboard)
    - Создание админ панели
    - Real-time метрики
    - Алерты и отчеты
 
 ### 🎯 НЕМЕДЛЕННЫЕ СЛЕДУЮЩИЕ ШАГИ (НА ЭТОЙ НЕДЕЛЕ):
-1. **Staging окружение** - создать тестовый контур
-2. **Исправить TTS** - решить проблемы с ElevenLabs
-3. **Фоновая музыка** - интеграция с Suno AI
-4. **Система мониторинга** - начать с базового трекинга событий
+1. **Staging окружение** - создать тестовый контур на Railway
+2. **КРИТИЧЕСКОЕ: Исправить ограничения** - метод can_create_free_story() не вызывается!
+3. **Gemini TTS** - заменить ElevenLabs на Google Gemini-TTS
+4. **Система платежей** - создать заглушку для подписок
+5. **Система мониторинга** - начать с базового трекинга событий
 
-**После этого у вас будет полноценный продукт с аналитикой готовый к первым пользователям! 🚀**
+**После этого у вас будет полноценный продукт с качественным аудио готовый к первым пользователям! 🚀**
 
 ---
 
 ## 🎯 ТЕКУЩИЕ ПРИОРИТЕТЫ (СЕГОДНЯ-ЗАВТРА)
 
-### 🚀 ВЫСШИЙ ПРИОРИТЕТ:
-1. **Staging Environment** - создать тестовый контур для безопасной разработки
-2. **Исправить TTS** - решить проблемы с ElevenLabs API
-3. **Фоновая музыка** - интеграция с Suno AI или ElevenLabs Music
-4. **Система мониторинга** - базовый трекинг событий и метрик
+### 🚀 КРИТИЧЕСКИЙ ПРИОРИТЕТ:
+1. **Исправить ограничения** - метод can_create_free_story() не вызывается!
+2. **Staging Environment** - создать тестовый контур на Railway
+3. **Gemini TTS** - заменить ElevenLabs на Google Gemini-TTS
+4. **Система платежей** - создать заглушку для подписок
 
 ### 🔧 ТЕХНИЧЕСКИЕ УЛУЧШЕНИЯ:
-1. **Обработка ошибок TTS** - исправить "quota exceeded"
-2. **Сохранение аудио в БД** - не терять сгенерированные файлы
-3. **Оптимизация производительности** - ускорить генерацию сказок
+1. **Тестовый режим** - список telegram_id без ограничений
+2. **Gemini TTS интеграция** - 30 голосов, промпты для детей
+3. **Сохранение аудио в БД** - не терять сгенерированные файлы
 4. **Event Tracking** - система сбора аналитических данных
 
 ### 📱 UX УЛУЧШЕНИЯ:
-1. **Выбор голоса** - позволить пользователю выбирать голос
-2. **Настройки аудио** - скорость чтения, громкость
-3. **Предпросмотр аудио** - прослушать перед сохранением
+1. **UI для лимитов** - показать когда сказки закончились
+2. **Предложение подписки** - 299₽/месяц с преимуществами
+3. **Качественная озвучка** - Gemini TTS для детей 2-8 лет
 4. **Аналитический дашборд** - понимание поведения пользователей
 
 ---
 
 ## 📊 СТАТИСТИКА ПРОЕКТА
 
-### ✅ ЗАВЕРШЕНО: 95%
+### ✅ ЗАВЕРШЕНО: 90%
 - **Инфраструктура**: 100% ✅
 - **MVP Бот**: 100% ✅  
 - **Безопасность**: 100% ✅
 - **UX/UI**: 100% ✅
 - **История**: 100% ✅
 - **Railway Deploy**: 100% ✅
-- **TTS**: 70% 🔄
+- **Ограничения**: 0% ❌ (КРИТИЧЕСКАЯ ОШИБКА!)
+- **TTS**: 70% 🔄 (ElevenLabs → Gemini)
+- **Платежи**: 0% ❌
 - **Серии**: 0% ❌
 - **Мониторинг**: 0% ❌
 
-### 🎯 ЦЕЛЬ: 98% готовности к релизу
-**Осталось**: Staging + улучшение TTS + фоновая музыка + система серий + мониторинг
+### 🎯 ЦЕЛЬ: 95% готовности к релизу
+**Осталось**: Исправить ограничения + Gemini TTS + платежи + система серий + мониторинг
 
 ### 🚨 КРИТИЧЕСКИЕ ЗАДАЧИ:
-1. **Staging Environment** - для безопасной разработки
-2. **TTS Fixes** - исправить ошибки ElevenLabs
-3. **Audio Production** - полный аудио контент
-4. **Series System** - многосерийные сказки
-5. **Analytics System** - мониторинг пользователей и бизнес-метрик
+1. **ИСПРАВИТЬ ОГРАНИЧЕНИЯ** - can_create_free_story() не вызывается!
+2. **Staging Environment** - для безопасной разработки
+3. **Gemini TTS** - заменить ElevenLabs на Google TTS
+4. **Система платежей** - заглушка для подписок
+5. **Series System** - многосерийные сказки
+6. **Analytics System** - мониторинг пользователей и бизнес-метрик
 
-**Проект готов к production использованию! 🎉**
+**Проект требует критических исправлений перед production! 🚨**
 
 ---
 
@@ -1599,9 +1622,10 @@ WEEKLY_REPORTS = {
 
 ### 🎯 Приоритеты внедрения:
 
-1. **Неделя 1**: Базовый трекинг событий
-2. **Неделя 2**: User Analytics и воронка конверсии  
-3. **Неделя 3**: Content Analytics и Business Metrics
-4. **Неделя 4**: Real-time Dashboard и алерты
+1. **Неделя 1**: Критические исправления (ограничения + Gemini TTS + платежи)
+2. **Неделя 2**: Серии сказок + Базовый трекинг событий
+3. **Неделя 3**: User Analytics и воронка конверсии  
+4. **Неделя 4**: Content Analytics и Business Metrics
+5. **Неделя 5**: Real-time Dashboard и алерты
 
-**Система мониторинга критически важна для понимания бизнеса и принятия решений! 📊**
+**ВНИМАНИЕ: Сначала исправить критические ошибки, потом аналитику! 🚨**

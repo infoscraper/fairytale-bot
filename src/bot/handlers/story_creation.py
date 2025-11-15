@@ -42,8 +42,9 @@ async def start_new_story(
         f"или предложите свою:",
         reply_markup=keyboard
     )
-    
-    await callback.answer()
+    # Do NOT answer the callback here again — it was already answered at the start
+    # A repeated answer after long processing causes TelegramBadRequest: query is too old
+    pass
 
 
 @router.callback_query(F.data.startswith("theme_"))
@@ -96,148 +97,195 @@ async def handle_theme_selection(
         selected_theme=theme
     )
     
-    # Show progress message
-    import time
+    # Show immediate response and start background task
+    progress_message = await callback.message.edit_text(
+        f"🎭 Создаю волшебную сказку для {child.name}!\n\n"
+        f"✨ Тема: {theme or 'сюрприз'}\n"
+        f"⏱️ Это займет 30-60 секунд\n\n"
+        f"🔮 Начинаю работу..."
+    )
+    
+    # Try background story generation first
+    celery_available = False
+    
+    try:
+        from ...tasks.story_tasks import generate_story_async
+        from ...core.celery_app import celery_app
+        
+        # Check if Celery is available by inspecting active workers
+        inspect = celery_app.control.inspect()
+        active_workers = inspect.active()
+        
+        if active_workers:
+            print(f"🔧 Celery workers found: {list(active_workers.keys())}")
+            celery_available = True
+        else:
+            print("⚠️ No active Celery workers found")
+            
+    except Exception as e:
+        print(f"⚠️ Celery not available: {e}")
+    
+    if celery_available:
+        try:
+            # Launch async task
+            task_result = generate_story_async.delay(
+                child_id=child_id,
+                theme=theme if theme != "random" else None,
+                message_id=progress_message.message_id,
+                chat_id=callback.message.chat.id
+            )
+            
+            print(f"🚀 Celery task launched: {task_result.id}")
+            
+            # Immediate response to user
+            await callback.message.edit_text(
+                f"✅ Сказка для {child.name} запущена в работу!\n\n"
+                f"🎭 Тема: {theme or 'сюрприз'}\n"
+                f"⏱️ Ожидайте 30-60 секунд\n\n"
+                f"🤖 Я пришлю готовую сказку, как только закончу!\n"
+                f"📱 Можете пользоваться ботом дальше."
+            )
+            
+            # Clear state
+            await state.clear()
+            return
+            
+        except Exception as e:
+            print(f"❌ Error launching Celery task: {e}")
+            celery_available = False
+    
+    # Fallback to synchronous generation
+    print("🔄 Using synchronous story generation (fallback)")
+    
     progress_message = await callback.message.edit_text(
         f"🎭 Создаю волшебную сказку...\n"
         f"✨ Это займет около минуты\n\n"
-        f"🔮 Придумываю историю... {int(time.time()) % 1000}"
+        f"🔮 Придумываю историю..."
     )
     
-    try:
-        # Generate story
-        print(f"🏗️ Starting story creation for child_id: {child_id}")
-        story_service = StoryService(session)
-        story = await story_service.create_story(
-            child_id=child_id,
-            theme=theme if theme != "random" else None
-        )
-        
-        # Update progress
-        print(f"📝 Story created successfully: {story.id}")
-        await callback.bot.edit_message_text(
-            chat_id=callback.message.chat.id,
-            message_id=progress_message.message_id,
-            text="🎭 Сказка готова! 🎙️ Создаю аудио..."
-        )
-        print(f"✅ Progress message updated")
-        
-        # Generate audio with Charlotte's voice
-        print(f"🎙️ Starting TTS generation...")
-        tts_service = TTSService()
-        audio_buffer = await tts_service.generate_audio_for_story(
-            story_text=story.story_text,
-            child_name=story.child_name,
-            child_age=story.child_age,
-            mood="cheerful"
-        )
-        print(f"✅ TTS result: {'Success' if audio_buffer else 'Failed'}")
-        
-        # Send the story
-        keyboard = get_feedback_keyboard(story.id, child_id)
-        
-        # Отправляем заголовок отдельно
-        header_message = (
-            f"📖 **Сказка для {story.child_name}**\n\n"
-            f"🎯 Тема: {story.theme}\n"
-            f"🎭 Персонажи: {', '.join(story.characters[:3])}\n"
-            f"💫 Мораль: {story.moral}\n\n"
-            f"{'='*30}"
-        )
-        
+    # Generate story synchronously as fallback
+    print(f"🏗️ Starting story creation for child_id: {child_id}")
+    story_service = StoryService(session)
+    story = await story_service.create_story(
+        child_id=child_id,
+        theme=theme if theme != "random" else None
+    )
+    
+    # Update progress
+    print(f"📝 Story created successfully: {story.id}")
+    await callback.bot.edit_message_text(
+        chat_id=callback.message.chat.id,
+        message_id=progress_message.message_id,
+        text="🎭 Сказка готова! 🎙️ Создаю аудио..."
+    )
+    print(f"✅ Progress message updated")
+    
+    # Generate audio with Charlotte's voice
+    print(f"🎙️ Starting TTS generation...")
+    tts_service = TTSService()
+    print(f"🔧 TTS service created, calling generate_audio_for_story...")
+    audio_buffer = await tts_service.generate_audio_for_story(
+        story_text=story.story_text,
+        child_name=story.child_name,
+        child_age=story.child_age,
+        mood="cheerful"
+    )
+    print(f"✅ TTS result: {'Success' if audio_buffer else 'Failed'}")
+    
+    # Send the story
+    keyboard = get_feedback_keyboard(story.id, child_id)
+    
+    # Отправляем заголовок отдельно
+    header_message = (
+        f"📖 **Сказка для {story.child_name}**\n\n"
+        f"🎯 Тема: {story.theme}\n"
+        f"🎭 Персонажи: {', '.join(story.characters[:3])}\n"
+        f"💫 Мораль: {story.moral}\n\n"
+        f"{'='*30}"
+    )
+    
+    await callback.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=header_message,
+        parse_mode="Markdown"
+    )
+    
+    # Отправляем текст сказки (разбиваем если слишком длинный)
+    max_message_length = 4000  # Оставляем запас для форматирования
+    
+    if len(story.story_text) <= max_message_length:
+        # Короткая сказка - отправляем целиком
         await callback.bot.send_message(
             chat_id=callback.message.chat.id,
-            text=header_message,
-            parse_mode="Markdown"
+            text=story.story_text
         )
+    else:
+        # Длинная сказка - разбиваем на части
+        chunks = []
+        current_chunk = ""
+        sentences = story.story_text.split('. ')
         
-        # Отправляем текст сказки (разбиваем если слишком длинный)
-        max_message_length = 4000  # Оставляем запас для форматирования
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) + 2 <= max_message_length:
+                current_chunk += sentence + '. '
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + '. '
         
-        if len(story.story_text) <= max_message_length:
-            # Короткая сказка - отправляем целиком
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        # Отправляем каждую часть
+        for i, chunk in enumerate(chunks, 1):
+            part_message = f"**Часть {i}/{len(chunks)}**\n\n{chunk}"
             await callback.bot.send_message(
                 chat_id=callback.message.chat.id,
-                text=story.story_text
+                text=part_message,
+                parse_mode="Markdown"
             )
-        else:
-            # Длинная сказка - разбиваем на части
-            chunks = []
-            current_chunk = ""
-            sentences = story.story_text.split('. ')
-            
-            for sentence in sentences:
-                if len(current_chunk) + len(sentence) + 2 <= max_message_length:
-                    current_chunk += sentence + '. '
-                else:
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                    current_chunk = sentence + '. '
-            
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            
-            # Отправляем каждую часть
-            for i, chunk in enumerate(chunks, 1):
-                part_message = f"**Часть {i}/{len(chunks)}**\n\n{chunk}"
-                await callback.bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text=part_message,
-                    parse_mode="Markdown"
-                )
-        
-        # Отправляем финальное сообщение с кнопками
-        final_message = f"{'='*30}\n\nПонравилась ли сказка {story.child_name}?"
-        
-        await callback.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=final_message,
-            reply_markup=keyboard
-        )
-        
-        # Send audio if generated successfully
-        if audio_buffer:
-            print(f"🎧 Sending audio file...")
-            audio_file = BufferedInputFile(
-                audio_buffer.read(),
-                filename=f"story_{story.id}_{story.child_name}.mp3"
-            )
-            
-            await callback.bot.send_audio(
-                chat_id=callback.message.chat.id,
-                audio=audio_file,
-                title=f"Сказка для {story.child_name}",
-                performer="Charlotte - Сказочница",
-                caption=f"🎧 Аудиоверсия сказки '{story.theme}' для {story.child_name}"
-            )
-            print(f"✅ Audio sent successfully!")
-        else:
-            print(f"❌ No audio to send")
-        
-        # Delete progress message
-        await callback.bot.delete_message(
-            chat_id=callback.message.chat.id,
-            message_id=progress_message.message_id
-        )
-        
-        # Update user's free stories counter
-        from ...services.user_service import UserService
-        user_service = UserService(session)
-        await user_service.use_free_story(current_user.id)
-        
-    except Exception as e:
-        print(f"💥 CRITICAL ERROR in story creation: {e}")
-        print(f"💥 Error type: {type(e)}")
-        import traceback
-        print(f"💥 Full traceback: {traceback.format_exc()}")
-        await callback.bot.edit_message_text(
-            chat_id=callback.message.chat.id,
-            message_id=progress_message.message_id,
-            text=f"😔 Произошла ошибка при создании сказки:\n{str(e)}\n\n"
-                 "Попробуйте еще раз через минуту."
-        )
     
-    await callback.answer()
+    # Отправляем финальное сообщение с кнопками
+    final_message = f"{'='*30}\n\nПонравилась ли сказка {story.child_name}?"
+    
+    await callback.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=final_message,
+        reply_markup=keyboard
+    )
+    
+    # Send audio if generated successfully
+    if audio_buffer:
+        print(f"🎧 Sending audio file...")
+        audio_file = BufferedInputFile(
+            audio_buffer.read(),
+            filename=f"story_{story.id}_{story.child_name}.mp3"
+        )
+        
+        await callback.bot.send_audio(
+            chat_id=callback.message.chat.id,
+            audio=audio_file,
+            title=f"Сказка для {story.child_name}",
+            performer="Charlotte - Сказочница",
+            caption=f"🎧 Аудиоверсия сказки '{story.theme}' для {story.child_name}"
+        )
+        print(f"✅ Audio sent successfully!")
+    else:
+        print(f"❌ No audio to send")
+    
+    # Delete progress message
+    await callback.bot.delete_message(
+        chat_id=callback.message.chat.id,
+        message_id=progress_message.message_id
+    )
+    
+    # Update user's free stories counter
+    from ...services.user_service import UserService
+    user_service = UserService(session)
+    await user_service.use_free_story(current_user.id)
+    
+    # Clear state
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("custom_theme_"))

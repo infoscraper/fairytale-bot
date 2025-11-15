@@ -74,6 +74,8 @@ temp/
 .env
 secrets.yaml
 config/secrets/
+*.json
+!package.json
 
 # Coverage
 .coverage

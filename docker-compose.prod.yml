@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: fairytale_app
+    restart: "on-failure:3"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 3
+        window: 120s
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - BOT_ROLE=${BOT_ROLE:-poller}
+      - DEBUG=${DEBUG:-False}
+      - TTS_PROVIDER=${TTS_PROVIDER:-gemini}
+      - GEMINI_TTS_MODEL=${GEMINI_TTS_MODEL:-gemini-2.5-flash-tts}
+      - GEMINI_TTS_VOICE=${GEMINI_TTS_VOICE:-Algieba}
+      - GEMINI_TTS_LANGUAGE=${GEMINI_TTS_LANGUAGE:-ru-ru}
+      - GEMINI_TTS_MAX_BYTES_PER_CHUNK=${GEMINI_TTS_MAX_BYTES_PER_CHUNK:-3800}
+      - GOOGLE_APPLICATION_CREDENTIALS_JSON=${GOOGLE_APPLICATION_CREDENTIALS_JSON}
+      - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID}
+    volumes:
+      - /tmp:/tmp
+    networks:
+      - fairytale_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe', timeout=10)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  celery_worker:
+    build: .
+    container_name: fairytale_celery
+    command: celery -A src.core.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - TTS_PROVIDER=${TTS_PROVIDER:-gemini}
+      - GEMINI_TTS_MODEL=${GEMINI_TTS_MODEL:-gemini-2.5-flash-tts}
+      - GEMINI_TTS_VOICE=${GEMINI_TTS_VOICE:-Algieba}
+      - GEMINI_TTS_LANGUAGE=${GEMINI_TTS_LANGUAGE:-ru-ru}
+      - GEMINI_TTS_MAX_BYTES_PER_CHUNK=${GEMINI_TTS_MAX_BYTES_PER_CHUNK:-3800}
+      - GOOGLE_APPLICATION_CREDENTIALS_JSON=${GOOGLE_APPLICATION_CREDENTIALS_JSON}
+      - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID}
+    volumes:
+      - /tmp:/tmp
+    networks:
+      - fairytale_network
+    restart: "on-failure:3"
+    deploy:
+      replicas: 1
+
+networks:
+  fairytale_network:
+    driver: bridge

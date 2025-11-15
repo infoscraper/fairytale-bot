@@ -23,4 +23,13 @@ celery_app.conf.update(
 )
 
 # Auto-discover tasks
-celery_app.autodiscover_tasks(['src.tasks'])
+# Celery expects packages that contain a 'tasks' submodule. Our project has
+# 'src/tasks', so we should pass the parent package 'src' (not 'src.tasks').
+celery_app.autodiscover_tasks(['src'])
+
+# As a safety net in non-standard runtimes, import task modules explicitly.
+try:  # pragma: no cover
+    import src.tasks.story_tasks  # noqa: F401
+    import src.tasks.test_tasks  # noqa: F401
+except Exception:  # Import errors should not crash worker startup
+    pass

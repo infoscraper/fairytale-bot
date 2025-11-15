@@ -1,2 +1,2 @@
-web: python -m src.main
-worker: celery -A src.core.celery_app worker --loglevel=info
+web: bash -lc 'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gsa.json 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gsa.json}; python -m src.main'
+worker: bash -lc 'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gsa.json 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gsa.json}; celery -A src.core.celery_app worker --loglevel=info'

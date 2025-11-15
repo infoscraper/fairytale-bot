@@ -7,6 +7,7 @@ import uuid
 import logging
 import os
 import sys
+import signal
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -31,14 +32,58 @@ logging.getLogger("elevenlabs").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+async def start_worker_mode():
+    """Start bot in worker mode (Celery tasks only, no polling)"""
+    logger.info("🔄 Starting Celery worker mode...")
+    
+    try:
+        # Import and start Celery worker
+        from .core.celery_app import celery_app
+        
+        # Start Celery worker in the background
+        import subprocess
+        import sys
+        
+        # Start Celery worker as subprocess
+        worker_process = subprocess.Popen([
+            sys.executable, "-m", "celery", 
+            "-A", "src.core.celery_app", 
+            "worker", 
+            "--loglevel=info",
+            "--concurrency=2"
+        ])
+        
+        logger.info(f"✅ Celery worker started with PID: {worker_process.pid}")
+        
+        # Keep the process alive
+        try:
+            worker_process.wait()
+        except KeyboardInterrupt:
+            logger.info("🛑 Stopping Celery worker...")
+            worker_process.terminate()
+            worker_process.wait()
+            
+    except Exception as e:
+        logger.error(f"❌ Error starting worker mode: {e}")
+        # Fallback: just keep the process alive without doing anything
+        logger.info("🔄 Fallback: keeping process alive for potential recovery...")
+        try:
+            while True:
+                await asyncio.sleep(60)
+                logger.info("💤 Worker mode: still alive...")
+        except KeyboardInterrupt:
+            logger.info("🛑 Worker mode stopped")
+
+
 async def init_database():
     """Initialize database with migrations"""
     logger.info("🔄 Initializing database...")
     
     try:
-        # Check if we're in Railway environment
-        if os.getenv("RAILWAY_ENVIRONMENT"):
-            logger.info("🚂 Running in Railway environment, creating tables...")
+        # Platform-agnostic auto-migration toggle (works for Dokploy, Railway, etc.)
+        auto_migrate = os.getenv("AUTO_MIGRATE", "0") == "1"
+        if auto_migrate:
+            logger.info("🗄️ AUTO_MIGRATE=1 → creating tables if not exist...")
             
             # Import database components
             from .core.database import engine
@@ -50,19 +95,19 @@ async def init_database():
             
             logger.info("✅ Database tables created successfully!")
         else:
-            logger.info("🏠 Running locally, skipping automatic migrations")
+            logger.info("⏭️ AUTO_MIGRATE is disabled — skipping automatic migrations")
             
     except Exception as e:
         logger.error(f"❌ Error initializing database: {e}")
         # Don't exit in production, just log the error
-        if not os.getenv("RAILWAY_ENVIRONMENT"):
+        if not (os.getenv("AUTO_MIGRATE", "0") == "1"):
             raise
 
 
 async def main():
     """Main function to start the bot"""
     
-    # Initialize database first (only in Railway)
+    # Initialize database first (when AUTO_MIGRATE=1)
     await init_database()
     
     # Initialize bot with default properties
@@ -91,15 +136,66 @@ async def main():
         should_poll = settings.BOT_ROLE == "poller" and settings.ENVIRONMENT in {"production", "staging", "development"}
         if not should_poll:
             logger.warning(f"🤚 Polling disabled. ENVIRONMENT={settings.ENVIRONMENT}, BOT_ROLE={settings.BOT_ROLE}")
+            logger.info("🔄 Starting as worker mode (Celery tasks only)")
+            await start_worker_mode()
             return
 
         # Acquire distributed lock to ensure a single poller
         lock_key = f"bot:poller_lock:{settings.TELEGRAM_BOT_TOKEN[:8]}"
         lock_value = str(uuid.uuid4())
         got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+        
         if not got_lock:
-            logger.warning("🔒 Another instance holds poller lock. Exiting without polling.")
-            return
+            # Check if existing lock is expired or from a dead process
+            logger.warning("🔒 Another instance holds poller lock. Checking if it's alive...")
+            
+            # Try to get the current lock value and TTL
+            current_value = await redis.get(lock_key)
+            ttl = await redis.ttl(lock_key)
+            
+            if current_value and ttl > 0:
+                if ttl > 60:  # Lock was recently renewed, respect it
+                    logger.warning(f"🔒 Lock is active (TTL: {ttl}s). Switching to worker mode.")
+                    logger.info("💡 Another instance is polling. This instance will work as Celery worker.")
+                    logger.info("🔄 Starting worker mode...")
+                    await start_worker_mode()
+                    return
+                else:
+                    # Lock is expiring soon, might be from a dying process
+                    logger.info(f"🕐 Lock expires soon (TTL: {ttl}s). Attempting to claim...")
+                    
+                    # More aggressive approach: try to claim immediately
+                    await redis.delete(lock_key)
+                    await asyncio.sleep(1)  # Brief pause
+                    
+                    got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+                    if got_lock:
+                        logger.info("✅ Successfully claimed expiring lock!")
+                    else:
+                        logger.warning("❌ Failed to claim expiring lock. Switching to worker mode.")
+                        await start_worker_mode()
+                        return
+            elif ttl <= 0:
+                logger.info("🧹 Found expired lock, attempting to claim it...")
+                # Force delete and claim
+                await redis.delete(lock_key)
+                got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+                if got_lock:
+                    logger.info("✅ Successfully claimed expired lock!")
+                else:
+                    logger.warning("❌ Failed to claim expired lock. Switching to worker mode.")
+                    await start_worker_mode()
+                    return
+            else:
+                logger.warning("🔒 Lock exists but no TTL info. Attempting force claim...")
+                # Force delete and try to claim
+                await redis.delete(lock_key)
+                await asyncio.sleep(2)
+                got_lock = await redis.set(lock_key, lock_value, ex=120, nx=True)
+                if not got_lock:
+                    logger.warning("❌ Failed to force claim lock. Switching to worker mode.")
+                    await start_worker_mode()
+                    return
 
         # Background task to renew lock TTL
         renew_task = None
@@ -122,9 +218,35 @@ async def main():
 
         renew_task = asyncio.create_task(_renew_lock())
 
+        # Setup signal handlers for graceful shutdown
+        shutdown_event = asyncio.Event()
+        
+        def signal_handler(signum, frame):
+            logger.info(f"🛑 Received signal {signum}, initiating graceful shutdown...")
+            shutdown_event.set()
+        
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        
         try:
-            # Start polling
-            await dp.start_polling(bot)
+            # Start polling with shutdown handling
+            polling_task = asyncio.create_task(dp.start_polling(bot))
+            shutdown_task = asyncio.create_task(shutdown_event.wait())
+            
+            # Wait for either polling to complete or shutdown signal
+            done, pending = await asyncio.wait(
+                [polling_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Cancel remaining tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                    
         finally:
             if renew_task:
                 renew_task.cancel()
